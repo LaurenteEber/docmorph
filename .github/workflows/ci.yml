@@ -1,0 +1,48 @@
+name: CI
+
+# Hosted execution is intentionally dormant until this directory is initialized
+# as a Git repository and connected to GitHub. The workflow is versioned now so
+# those gates become active with the first repository push.
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.toolchain }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.96.0", stable]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +${{ matrix.toolchain }} fmt --all -- --check
+      - name: Clippy
+        run: cargo +${{ matrix.toolchain }} clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Locked tests
+        run: cargo +${{ matrix.toolchain }} test --workspace --locked
+
+  supply-chain:
+    name: Supply chain
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install supply-chain tools
+        run: >-
+          cargo +stable install --locked cargo-audit --version 0.22.2 &&
+          cargo +stable install --locked cargo-deny --version 0.20.2 &&
+          cargo +stable install --locked cargo-cyclonedx --version 0.5.9
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
+      - name: Enforce dependency policy
+        run: cargo deny check
+      - name: Generate SBOM
+        run: cargo cyclonedx --all --format json
