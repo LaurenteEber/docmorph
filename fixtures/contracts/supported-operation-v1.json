@@ -1,0 +1,6 @@
+{
+  "contract_version": { "major": 1, "minor": 0 },
+  "kind": "mock_transform",
+  "bounds": { "max_input_bytes": 1024, "timeout_seconds": 30 },
+  "provenance": { "request_id": "fixture-supported-v1", "source": "compatibility-fixture" }
+}

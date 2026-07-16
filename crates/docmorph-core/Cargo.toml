@@ -9,3 +9,6 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+docmorph-contracts = { path = "../docmorph-contracts" }
