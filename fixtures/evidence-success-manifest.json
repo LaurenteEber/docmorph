@@ -1,0 +1,13 @@
+{
+  "contract_version": { "major": 1, "minor": 0 },
+  "fixtures": [
+    {
+      "id": "success",
+      "input": "mock/success-input.txt",
+      "output": "success-output.mock",
+      "allowed_roots": ["mock"],
+      "expected_outcome": "success",
+      "provenance": { "request_id": "fixture-success", "source": "manifest" }
+    }
+  ]
+}
