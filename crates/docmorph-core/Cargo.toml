@@ -12,3 +12,5 @@ workspace = true
 
 [dependencies]
 docmorph-contracts = { path = "../docmorph-contracts" }
+sha2.workspace = true
+rustix.workspace = true
