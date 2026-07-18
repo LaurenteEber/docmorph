@@ -1,1 +1,8 @@
 /target/
+
+# Local agent state
+.atl/
+.claude/
+
+# macOS
+.DS_Store
