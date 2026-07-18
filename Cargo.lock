@@ -55,6 +55,13 @@ dependencies = [
 [[package]]
 name = "docmorph-cli"
 version = "0.1.0"
+dependencies = [
+ "docmorph-contracts",
+ "docmorph-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "docmorph-contracts"
@@ -76,6 +83,13 @@ dependencies = [
 [[package]]
 name = "docmorph-evidence"
 version = "0.1.0"
+dependencies = [
+ "docmorph-contracts",
+ "docmorph-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "errno"

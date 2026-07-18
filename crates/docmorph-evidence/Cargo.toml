@@ -9,3 +9,10 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+docmorph-contracts = { path = "../docmorph-contracts" }
+docmorph-core = { path = "../docmorph-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

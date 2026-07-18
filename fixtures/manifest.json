@@ -1,0 +1,21 @@
+{
+  "contract_version": { "major": 1, "minor": 0 },
+  "fixtures": [
+    {
+      "id": "success",
+      "input": "mock/success-input.txt",
+      "output": "success-output.mock",
+      "allowed_roots": ["mock"],
+      "expected_outcome": "success",
+      "provenance": { "request_id": "fixture-success", "source": "manifest" }
+    },
+    {
+      "id": "policy-failure",
+      "input": "mock/policy-failure-input.txt",
+      "output": "policy-failure-output.mock",
+      "allowed_roots": ["mock/allowed"],
+      "expected_outcome": "failure",
+      "provenance": { "request_id": "fixture-policy-failure", "source": "manifest" }
+    }
+  ]
+}
