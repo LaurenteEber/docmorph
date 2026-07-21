@@ -1,18 +1,13 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::sync::Mutex;
 
-use docmorph_contracts::{
-    AdapterIdentity, CapabilityDeclaration, Diagnostic, Operation, OperationKind, OperationResult,
-};
+use docmorph_contracts::{AdapterIdentity, CapabilityDeclaration, Diagnostic, OperationKind};
 
-use crate::adapter::Adapter;
+use crate::adapter::{Adapter, AdapterOutput, AdapterRequest};
 
 /// A deterministic local adapter used to exercise lifecycle behavior without a document engine.
 #[derive(Debug, Default)]
 pub struct MockAdapter {
-    invocations: Mutex<Vec<PathBuf>>,
+    invocations: Mutex<Vec<Vec<u8>>>,
 }
 
 impl MockAdapter {
@@ -25,20 +20,12 @@ impl MockAdapter {
     }
 
     #[must_use]
-    pub fn last_input_path(&self) -> Option<PathBuf> {
+    pub fn last_input_bytes(&self) -> Option<Vec<u8>> {
         self.invocations
             .lock()
             .expect("mock state is available")
             .last()
             .cloned()
-    }
-
-    pub(crate) fn transform(&self, input: &Path, bytes: &[u8]) -> Vec<u8> {
-        self.invocations
-            .lock()
-            .expect("mock state is available")
-            .push(input.to_path_buf());
-        bytes.to_vec()
     }
 }
 
@@ -58,14 +45,15 @@ impl Adapter for MockAdapter {
         }]
     }
 
-    fn execute(&self, operation: &Operation) -> Result<OperationResult, Diagnostic> {
-        if operation.kind != OperationKind::MockTransform {
-            return Err(Diagnostic::unavailable_operation(operation.kind));
+    fn execute(&self, request: &AdapterRequest<'_>) -> Result<AdapterOutput, Diagnostic> {
+        if request.operation().kind != OperationKind::MockTransform {
+            return Err(Diagnostic::unavailable_operation(request.operation().kind));
         }
-        Ok(OperationResult {
-            contract_version: operation.contract_version,
-            diagnostics: Vec::new(),
-            provenance: operation.provenance.clone(),
-        })
+        let bytes = request.input_bytes().to_vec();
+        self.invocations
+            .lock()
+            .expect("mock state is available")
+            .push(bytes.clone());
+        Ok(AdapterOutput::new(bytes))
     }
 }

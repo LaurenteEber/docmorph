@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use docmorph_contracts::{
-    AdapterIdentity, CapabilityDeclaration, Diagnostic, Operation, OperationResult,
-    validate_contract_version,
+    AdapterIdentity, CapabilityDeclaration, Diagnostic, validate_contract_version,
 };
 
-use crate::adapter::Adapter;
+use crate::adapter::{Adapter, AdapterOutput, AdapterRequest};
 
 /// A deterministic view of registered adapter declarations.
 #[derive(Default)]
@@ -18,6 +17,12 @@ pub enum RegistryError {
     Contract(Diagnostic),
     Unavailable(Diagnostic),
     Adapter(Diagnostic),
+}
+
+impl<T: Adapter + 'static> From<Arc<T>> for Registry {
+    fn from(adapter: Arc<T>) -> Self {
+        Self::new(vec![adapter])
+    }
 }
 
 impl Registry {
@@ -38,7 +43,8 @@ impl Registry {
         declarations
     }
 
-    pub fn execute(&self, operation: &Operation) -> Result<OperationResult, RegistryError> {
+    pub fn execute(&self, request: &AdapterRequest<'_>) -> Result<AdapterOutput, RegistryError> {
+        let operation = request.operation();
         validate_contract_version(operation.contract_version).map_err(RegistryError::Contract)?;
 
         let adapter = self.adapters.iter().find(|adapter| {
@@ -55,6 +61,6 @@ impl Registry {
             ));
         };
 
-        adapter.execute(operation).map_err(RegistryError::Adapter)
+        adapter.execute(request).map_err(RegistryError::Adapter)
     }
 }
