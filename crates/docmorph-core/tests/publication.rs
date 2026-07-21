@@ -75,22 +75,31 @@ fn preserves_an_existing_destination_without_leaving_a_partial_output() {
 }
 
 #[test]
-fn recovers_from_a_stale_staging_file_left_by_a_previous_failed_publish() {
+fn retains_an_occupied_unowned_staging_name_while_retrying_exclusively() {
     let root = TempRoot::new();
     let destination = root.0.join("result.mock");
-    let stale_staging = root
-        .0
-        .join(format!(".result.mock.{}.staging", std::process::id()));
-    fs::write(&stale_staging, b"stale bytes").expect("stale staging file is pre-created");
+    let occupied_stages: Vec<_> = (0..4)
+        .map(|sequence| {
+            root.0.join(format!(
+                ".result.mock.{}.{sequence}.staging",
+                std::process::id()
+            ))
+        })
+        .collect();
+    for stage in &occupied_stages {
+        fs::write(stage, b"live bytes").expect("occupied staging file is pre-created");
+    }
 
     let publication = validate_destination(&InputPolicy::new(vec![root.0.clone()]), &destination)
         .expect("destination is pinned beneath the allowed root")
         .publish_no_overwrite(b"fresh bytes")
-        .expect("publication recovers from the stale staging file");
+        .expect("publication retries without deleting the occupied staging file");
 
     assert_eq!(publication.byte_len, 11);
     assert_eq!(fs::read(&destination).unwrap(), b"fresh bytes");
-    assert!(!stale_staging.exists(), "stale staging file is removed");
+    for stage in occupied_stages {
+        assert_eq!(fs::read(stage).unwrap(), b"live bytes");
+    }
 }
 
 #[test]
