@@ -5,6 +5,7 @@ use std::{
     io::Read,
     os::fd::OwnedFd,
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use docmorph_contracts::Diagnostic;
@@ -16,6 +17,8 @@ compile_error!("docmorph-core local I/O policy requires Unix descriptor-relative
 
 /// Maximum local input size accepted by the Phase 0 policy.
 pub const MAX_INPUT_BYTES: u64 = 200 * 1024 * 1024;
+const STAGING_RETRY_LIMIT: u64 = 16;
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Canonical filesystem roots from which inputs may be accepted.
 #[derive(Clone)]
@@ -99,6 +102,8 @@ pub struct PinnedDestination {
     filename: std::ffi::OsString,
     #[cfg(test)]
     force_post_link_sync_failure: bool,
+    #[cfg(test)]
+    after_sync_before_link: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ValidatedInput {
@@ -121,31 +126,19 @@ impl PinnedDestination {
         self
     }
 
+    #[cfg(test)]
+    #[must_use]
+    fn with_after_sync_before_link<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.after_sync_before_link = Some(Arc::new(hook));
+        self
+    }
+
     /// Stages and links an artifact relative to the already-open destination parent.
     pub fn publish_no_overwrite(self, bytes: &[u8]) -> Result<Publication, Diagnostic> {
-        let staging = std::ffi::OsString::from(format!(
-            ".{}.{}.staging",
-            self.filename.to_string_lossy(),
-            std::process::id()
-        ));
-        let create_staging = || {
-            openat(
-                &self.parent,
-                &staging,
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
-            )
-        };
-        let staging_fd = match create_staging() {
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = unlinkat(&self.parent, &staging, AtFlags::empty());
-                create_staging()
-            }
-            first => first,
-        }
-        .map_err(|error| {
-            output_staging_failed(&format!("staging file cannot be created: {error}"))
-        })?;
+        let (staging, staging_fd) = create_owned_staging(&self.parent, &self.filename)?;
         let mut staging_file = std::fs::File::from(staging_fd);
         use std::io::Write;
         let result = (|| {
@@ -161,6 +154,10 @@ impl PinnedDestination {
                 code: "output_staging_failed".into(),
                 message: "staging bytes cannot be synced".into(),
             })?;
+            #[cfg(test)]
+            if let Some(hook) = &self.after_sync_before_link {
+                hook();
+            }
             linkat(
                 &self.parent,
                 &staging,
@@ -201,6 +198,38 @@ impl PinnedDestination {
             sha256,
         })
     }
+}
+
+fn create_owned_staging(
+    parent: &OwnedFd,
+    filename: &std::ffi::OsStr,
+) -> Result<(std::ffi::OsString, OwnedFd), Diagnostic> {
+    for _ in 0..STAGING_RETRY_LIMIT {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging = std::ffi::OsString::from(format!(
+            ".{}.{}.{}.staging",
+            filename.to_string_lossy(),
+            std::process::id(),
+            sequence
+        ));
+        match openat(
+            parent,
+            &staging,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        ) {
+            Ok(file) => return Ok((staging, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(output_staging_failed(&format!(
+                    "staging file cannot be created: {error}"
+                )));
+            }
+        }
+    }
+    Err(output_staging_failed(
+        "staging file name collision retry limit reached",
+    ))
 }
 
 /// Canonicalizes, bounds, and reads a regular local input without adapter involvement.
@@ -294,6 +323,8 @@ pub fn validate_destination(
         filename: filename.to_os_string(),
         #[cfg(test)]
         force_post_link_sync_failure: false,
+        #[cfg(test)]
+        after_sync_before_link: None,
     })
 }
 
@@ -388,8 +419,9 @@ fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
 mod tests {
     use std::{
         io::Write,
-        sync::Arc,
         sync::atomic::{AtomicU64, Ordering},
+        sync::{Arc, Barrier, mpsc},
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -397,7 +429,7 @@ mod tests {
         ContractVersion, ExecutionBounds, Operation, OperationKind, Provenance,
     };
 
-    use super::{InputPolicy, MAX_INPUT_BYTES, validate_destination};
+    use super::{InputPolicy, MAX_INPUT_BYTES, STAGING_SEQUENCE, validate_destination};
     use crate::{Lifecycle, MockAdapter};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -465,6 +497,109 @@ mod tests {
 
         assert_eq!(error.code, "output_published_durability_unknown");
         assert_eq!(std::fs::read(&destination).unwrap(), b"durable bytes");
+    }
+
+    #[test]
+    fn concurrent_publications_wait_for_two_synced_owned_stages_before_linking() {
+        let root = TempRoot::new();
+        let destination = root.0.join("result.mock");
+        let policy = InputPolicy::new(vec![root.0.clone()]);
+        let barrier = Arc::new(Barrier::new(3));
+        let (synced, reached_sync) = mpsc::channel();
+        let collision_sequence = STAGING_SEQUENCE.load(Ordering::Relaxed);
+        let unowned_stage = root.0.join(format!(
+            ".result.mock.{}.{}.staging",
+            std::process::id(),
+            collision_sequence
+        ));
+        std::fs::write(&unowned_stage, b"live bytes").expect("unowned stage is created");
+
+        let first = {
+            let barrier = Arc::clone(&barrier);
+            let synced = synced.clone();
+            let policy = policy.clone();
+            let destination = destination.clone();
+            thread::spawn(move || {
+                validate_destination(&policy, destination)
+                    .expect("first destination is pinned")
+                    .with_after_sync_before_link(move || {
+                        synced.send(()).expect("sync arrival is recorded");
+                        barrier.wait();
+                    })
+                    .publish_no_overwrite(b"first complete candidate")
+            })
+        };
+        let second = {
+            let barrier = Arc::clone(&barrier);
+            let policy = policy.clone();
+            let destination = destination.clone();
+            thread::spawn(move || {
+                validate_destination(&policy, destination)
+                    .expect("second destination is pinned")
+                    .with_after_sync_before_link(move || {
+                        synced.send(()).expect("sync arrival is recorded");
+                        barrier.wait();
+                    })
+                    .publish_no_overwrite(b"second complete candidate")
+            })
+        };
+
+        reached_sync
+            .recv()
+            .expect("first synced stage reaches the hook");
+        reached_sync
+            .recv()
+            .expect("second synced stage reaches the hook");
+        let owned_stages: Vec<_> = std::fs::read_dir(&root.0)
+            .expect("publication directory is readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path() != unowned_stage
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!(".result.mock.{}.", std::process::id()))
+            })
+            .collect();
+        assert_eq!(
+            owned_stages.len(),
+            2,
+            "two distinct owned stages are synced"
+        );
+        barrier.wait();
+
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|error| error.code == "output_exists")
+                .count(),
+            1
+        );
+        let final_bytes = std::fs::read(&destination).expect("winner is published");
+        assert!(
+            final_bytes == b"first complete candidate"
+                || final_bytes == b"second complete candidate"
+        );
+        assert_eq!(
+            std::fs::read(&unowned_stage).unwrap(),
+            b"live bytes",
+            "unowned staging files are not deleted"
+        );
+        assert!(
+            std::fs::read_dir(&root.0)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| {
+                    entry.path() == unowned_stage
+                        || !entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(&format!(".result.mock.{}.", std::process::id()))
+                })
+        );
     }
 
     #[test]
