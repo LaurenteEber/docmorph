@@ -138,7 +138,7 @@ impl PinnedDestination {
 
     /// Stages and links an artifact relative to the already-open destination parent.
     pub fn publish_no_overwrite(self, bytes: &[u8]) -> Result<Publication, Diagnostic> {
-        let (staging, staging_fd) = create_owned_staging(&self.parent, &self.filename)?;
+        let (staging, staging_fd) = create_owned_staging(&self.parent)?;
         let mut staging_file = std::fs::File::from(staging_fd);
         use std::io::Write;
         let result = (|| {
@@ -200,18 +200,19 @@ impl PinnedDestination {
     }
 }
 
-fn create_owned_staging(
+fn create_owned_staging(parent: &OwnedFd) -> Result<(std::ffi::OsString, OwnedFd), Diagnostic> {
+    create_owned_staging_with_sequence(parent, || STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+}
+
+fn create_owned_staging_with_sequence<F>(
     parent: &OwnedFd,
-    filename: &std::ffi::OsStr,
-) -> Result<(std::ffi::OsString, OwnedFd), Diagnostic> {
+    mut next_sequence: F,
+) -> Result<(std::ffi::OsString, OwnedFd), Diagnostic>
+where
+    F: FnMut() -> u64,
+{
     for _ in 0..STAGING_RETRY_LIMIT {
-        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let staging = std::ffi::OsString::from(format!(
-            ".{}.{}.{}.staging",
-            filename.to_string_lossy(),
-            std::process::id(),
-            sequence
-        ));
+        let staging = staging_component(std::process::id(), next_sequence());
         match openat(
             parent,
             &staging,
@@ -230,6 +231,10 @@ fn create_owned_staging(
     Err(output_staging_failed(
         "staging file name collision retry limit reached",
     ))
+}
+
+fn staging_component(process_id: u32, sequence: u64) -> std::ffi::OsString {
+    format!(".docmorph-stage.{process_id}.{sequence}").into()
 }
 
 /// Canonicalizes, bounds, and reads a regular local input without adapter involvement.
@@ -429,7 +434,10 @@ mod tests {
         ContractVersion, ExecutionBounds, Operation, OperationKind, Provenance,
     };
 
-    use super::{InputPolicy, MAX_INPUT_BYTES, STAGING_SEQUENCE, validate_destination};
+    use super::{
+        InputPolicy, MAX_INPUT_BYTES, create_owned_staging_with_sequence, staging_component,
+        validate_destination,
+    };
     use crate::{Lifecycle, MockAdapter};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -500,18 +508,43 @@ mod tests {
     }
 
     #[test]
+    fn retries_occupied_bounded_staging_candidates_without_deleting_them() {
+        let root = TempRoot::new();
+        let destination = root.0.join("result.mock");
+        let pinned = validate_destination(&InputPolicy::new(vec![root.0.clone()]), &destination)
+            .expect("destination is pinned beneath the allowed root");
+        let occupied_stages: Vec<_> = (0..4)
+            .map(|sequence| root.0.join(staging_component(std::process::id(), sequence)))
+            .collect();
+        for stage in &occupied_stages {
+            std::fs::write(stage, b"live bytes").expect("occupied staging file is pre-created");
+        }
+
+        let mut sequence = 0;
+        let (staging, staging_fd) = create_owned_staging_with_sequence(&pinned.parent, || {
+            let current = sequence;
+            sequence += 1;
+            current
+        })
+        .expect("a later bounded candidate is exclusively created");
+        drop(std::fs::File::from(staging_fd));
+
+        assert_eq!(staging, staging_component(std::process::id(), 4));
+        for stage in occupied_stages {
+            assert_eq!(std::fs::read(stage).unwrap(), b"live bytes");
+        }
+        rustix::fs::unlinkat(&pinned.parent, &staging, rustix::fs::AtFlags::empty())
+            .expect("only the exclusively owned candidate is removed");
+    }
+
+    #[test]
     fn concurrent_publications_wait_for_two_synced_owned_stages_before_linking() {
         let root = TempRoot::new();
         let destination = root.0.join("result.mock");
         let policy = InputPolicy::new(vec![root.0.clone()]);
         let barrier = Arc::new(Barrier::new(3));
         let (synced, reached_sync) = mpsc::channel();
-        let collision_sequence = STAGING_SEQUENCE.load(Ordering::Relaxed);
-        let unowned_stage = root.0.join(format!(
-            ".result.mock.{}.{}.staging",
-            std::process::id(),
-            collision_sequence
-        ));
+        let unowned_stage = root.0.join(staging_component(std::process::id(), u64::MAX));
         std::fs::write(&unowned_stage, b"live bytes").expect("unowned stage is created");
 
         let first = {
@@ -558,7 +591,7 @@ mod tests {
                     && entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with(&format!(".result.mock.{}.", std::process::id()))
+                        .starts_with(&format!(".docmorph-stage.{}.", std::process::id()))
             })
             .collect();
         assert_eq!(
@@ -597,7 +630,7 @@ mod tests {
                         || !entry
                             .file_name()
                             .to_string_lossy()
-                            .starts_with(&format!(".result.mock.{}.", std::process::id()))
+                            .starts_with(&format!(".docmorph-stage.{}.", std::process::id()))
                 })
         );
     }
