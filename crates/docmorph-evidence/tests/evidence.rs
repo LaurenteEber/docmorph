@@ -77,6 +77,12 @@ fn manifest_run_records_success_and_policy_failure_with_honest_metrics() {
     assert!(receipt.contains("\"fixture_sha256\""));
     assert!(receipt.contains("\"adapter\":{\"name\":\"mock\""));
     let receipt_value: serde_json::Value = serde_json::from_str(&receipt).expect("receipt is JSON");
+    assert_eq!(
+        receipt_value["platform"]["family"],
+        std::env::consts::FAMILY
+    );
+    assert_eq!(receipt_value["platform"]["os"], std::env::consts::OS);
+    assert_eq!(receipt_value["platform"]["arch"], std::env::consts::ARCH);
     let success = receipt_value["outcomes"]
         .as_array()
         .expect("receipt outcomes are an array")
@@ -88,6 +94,9 @@ fn manifest_run_records_success_and_policy_failure_with_honest_metrics() {
         success["fixture_sha256"],
         format!("{:x}", Sha256::digest(input))
     );
+    assert_eq!(success["artifact"]["path"], "artifacts/success-output.mock");
+    assert_eq!(success["artifact"]["byte_len"], 37);
+    assert_eq!(success["artifact"]["sha256"], success["fixture_sha256"]);
     assert_eq!(
         fs::read(root.0.join("artifacts/success-output.mock")).unwrap(),
         fs::read(manifest().parent().unwrap().join("mock/success-input.txt")).unwrap()
@@ -109,6 +118,9 @@ fn deterministic_mock_runs_keep_the_same_semantic_receipt_identity() {
         field_value(&first_receipt, "semantic_sha256"),
         field_value(&second_receipt, "semantic_sha256")
     );
+    let first: serde_json::Value = serde_json::from_str(&first_receipt).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&second_receipt).unwrap();
+    assert_ne!(first["command"], second["command"]);
     assert_ne!(field_value(&first_receipt, "semantic_sha256"), "");
 }
 
@@ -131,11 +143,56 @@ fn receipt_command_records_each_requested_manifest_path() {
         assert_eq!(
             receipt["command"],
             serde_json::json!([
-                "docmorph-evidence",
+                env!("CARGO_BIN_EXE_docmorph-evidence"),
                 "--manifest",
                 manifest_path.to_string_lossy(),
+                "--receipt-dir",
+                receipt_dir.to_string_lossy(),
             ])
         );
+        assert_eq!(receipt["schema_version"], "1.1");
+        for field in ["release", "commit_hash", "host", "llvm_version"] {
+            assert!(
+                receipt["build_compiler"][field]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "build compiler {field} is present"
+            );
+        }
+    }
+}
+
+#[test]
+fn failure_diagnostic_codes_are_required_exact_and_prevent_invalid_receipts() {
+    let root = TempRoot::new();
+    let allowed = root.0.join("allowed");
+    fs::create_dir(&allowed).expect("allowed root is created");
+
+    for (name, expected_code) in [
+        ("missing", None),
+        ("wrong", Some("input_too_large")),
+        ("unexpected", Some("input_outside_allowed_root")),
+    ] {
+        let manifest_path = root.0.join(format!("{name}.json"));
+        let receipt_dir = root.0.join(format!("receipt-{name}"));
+        let expected = expected_code
+            .map(|code| format!(",\"expected_diagnostic_code\":\"{code}\""))
+            .unwrap_or_default();
+        let expected_outcome = if name == "unexpected" {
+            "success"
+        } else {
+            "failure"
+        };
+        fs::write(
+            &manifest_path,
+            format!(
+                "{{\"contract_version\":{{\"major\":1,\"minor\":0}},\"fixtures\":[{{\"id\":\"{name}\",\"input\":\"missing.txt\",\"output\":\"result.mock\",\"allowed_roots\":[\"allowed\"],\"expected_outcome\":\"{expected_outcome}\"{expected},\"provenance\":{{\"request_id\":\"{name}\",\"source\":\"test\"}}}}]}}"
+            ),
+        )
+        .expect("manifest is written");
+
+        assert_ne!(run(&manifest_path, &receipt_dir).status.code(), Some(0));
+        assert!(!receipt_dir.join("receipt.json").exists());
     }
 }
 
@@ -150,7 +207,7 @@ fn disallowed_directory_fixture_is_rejected_without_harness_read_or_hash() {
     fs::create_dir(&disallowed).expect("disallowed directory is created");
     fs::write(
         &manifest_path,
-        r#"{"contract_version":{"major":1,"minor":0},"fixtures":[{"id":"disallowed","input":"disallowed-directory","output":"result.mock","allowed_roots":["allowed"],"expected_outcome":"failure","provenance":{"request_id":"disallowed","source":"test"}}]}"#,
+        r#"{"contract_version":{"major":1,"minor":0},"fixtures":[{"id":"disallowed","input":"disallowed-directory","output":"result.mock","allowed_roots":["allowed"],"expected_outcome":"failure","expected_diagnostic_code":"input_outside_allowed_root","provenance":{"request_id":"disallowed","source":"test"}}]}"#,
     )
     .expect("manifest is written");
 
@@ -166,4 +223,6 @@ fn disallowed_directory_fixture_is_rejected_without_harness_read_or_hash() {
         "input_outside_allowed_root"
     );
     assert!(receipt["outcomes"][0]["fixture_sha256"].is_null());
+    assert!(receipt["outcomes"][0]["artifact"].is_null());
+    assert_eq!(receipt["schema_version"], "1.1");
 }
