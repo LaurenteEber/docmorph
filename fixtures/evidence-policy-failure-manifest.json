@@ -7,6 +7,7 @@
       "output": "policy-failure-output.mock",
       "allowed_roots": ["mock/allowed"],
       "expected_outcome": "failure",
+      "expected_diagnostic_code": "input_outside_allowed_root",
       "provenance": { "request_id": "fixture-policy-failure", "source": "manifest" }
     }
   ]
