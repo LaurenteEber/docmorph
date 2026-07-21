@@ -12,7 +12,7 @@ use docmorph_contracts::{
     AdapterIdentity, ContractVersion, Diagnostic, ExecutionBounds, MetricAvailability, Operation,
     OperationKind, Provenance,
 };
-use docmorph_core::{Adapter, InputPolicy, Lifecycle, MockAdapter};
+use docmorph_core::{Adapter, InputPolicy, Lifecycle, MockAdapter, Registry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -234,7 +234,10 @@ fn run_fixture(
         bounds: ExecutionBounds::default(),
         provenance: fixture.provenance.clone(),
     };
-    let lifecycle = Lifecycle::new(InputPolicy::new(roots), Arc::clone(mock));
+    let lifecycle = Lifecycle::new(
+        InputPolicy::new(roots),
+        Registry::new(vec![Arc::clone(mock) as Arc<dyn Adapter>]),
+    );
     let result = lifecycle.submit(&operation, &input, &destination);
     let (outcome, fixture_sha256, diagnostics, artifact) = match result {
         Ok(result) => (

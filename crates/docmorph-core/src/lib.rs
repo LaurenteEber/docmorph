@@ -6,7 +6,7 @@ pub mod lifecycle;
 pub mod mock;
 pub mod registry;
 
-pub use adapter::Adapter;
+pub use adapter::{Adapter, AdapterOutput, AdapterRequest};
 pub use io::InputPolicy;
 pub use lifecycle::{Lifecycle, LifecycleFailure, LifecycleResult};
 pub use mock::MockAdapter;

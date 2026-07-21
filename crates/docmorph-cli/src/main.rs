@@ -133,7 +133,10 @@ fn run_mock(args: &[String]) -> ExitCode {
     };
 
     let policy = InputPolicy::new(parsed.allowed_roots);
-    let lifecycle = Lifecycle::new(policy, Arc::new(MockAdapter::default()));
+    let lifecycle = Lifecycle::new(
+        policy,
+        Registry::new(vec![Arc::new(MockAdapter::default())]),
+    );
 
     match lifecycle.submit(&operation, &parsed.input, &parsed.destination) {
         Ok(result) => {
