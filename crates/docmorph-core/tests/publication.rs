@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs::{self, File},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,6 +10,21 @@ use docmorph_core::io::{InputPolicy, validate_destination};
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TempRoot(PathBuf);
+
+struct ProbeFile(PathBuf);
+
+impl ProbeFile {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        File::create_new(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ProbeFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 impl TempRoot {
     fn new() -> Self {
@@ -29,6 +44,38 @@ impl Drop for TempRoot {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn assert_no_staging_residue(root: &std::path::Path) {
+    assert!(fs::read_dir(root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".docmorph-stage.")
+    }));
+}
+
+fn greatest_accepted_ascii_component_length(root: &std::path::Path) -> usize {
+    let accepts = |length| ProbeFile::create(root.join("p".repeat(length))).is_ok();
+    let mut accepted = 1;
+    assert!(accepts(accepted), "a one-byte ASCII component is accepted");
+    let mut rejected = accepted * 2;
+    while accepts(rejected) {
+        accepted = rejected;
+        rejected = rejected
+            .checked_mul(2)
+            .expect("component length grows safely");
+    }
+    while accepted + 1 < rejected {
+        let candidate = accepted + (rejected - accepted) / 2;
+        if accepts(candidate) {
+            accepted = candidate;
+        } else {
+            rejected = candidate;
+        }
+    }
+    accepted
 }
 
 #[test]
@@ -52,6 +99,7 @@ fn atomically_publishes_complete_bytes_and_returns_their_hash() {
             .unwrap()
             .all(|entry| entry.unwrap().path() == destination)
     );
+    assert_no_staging_residue(&root.0);
 }
 
 #[test]
@@ -72,25 +120,49 @@ fn preserves_an_existing_destination_without_leaving_a_partial_output() {
         1,
         "no staging file remains after the collision"
     );
+    assert_no_staging_residue(&root.0);
 }
 
 #[test]
-fn recovers_from_a_stale_staging_file_left_by_a_previous_failed_publish() {
+fn retains_an_occupied_unowned_bounded_staging_name() {
     let root = TempRoot::new();
     let destination = root.0.join("result.mock");
-    let stale_staging = root
-        .0
-        .join(format!(".result.mock.{}.staging", std::process::id()));
-    fs::write(&stale_staging, b"stale bytes").expect("stale staging file is pre-created");
+    let occupied_stages: Vec<_> = (0..4)
+        .map(|sequence| {
+            root.0
+                .join(format!(".docmorph-stage.{}.{sequence}", std::process::id()))
+        })
+        .collect();
+    for stage in &occupied_stages {
+        fs::write(stage, b"live bytes").expect("occupied staging file is pre-created");
+    }
 
     let publication = validate_destination(&InputPolicy::new(vec![root.0.clone()]), &destination)
         .expect("destination is pinned beneath the allowed root")
         .publish_no_overwrite(b"fresh bytes")
-        .expect("publication recovers from the stale staging file");
+        .expect("publication retries without deleting the occupied staging file");
 
     assert_eq!(publication.byte_len, 11);
     assert_eq!(fs::read(&destination).unwrap(), b"fresh bytes");
-    assert!(!stale_staging.exists(), "stale staging file is removed");
+    for stage in occupied_stages {
+        assert_eq!(fs::read(stage).unwrap(), b"live bytes");
+    }
+}
+
+#[test]
+fn publishes_to_a_distinct_absent_component_at_the_filesystem_limit() {
+    let root = TempRoot::new();
+    let component_length = greatest_accepted_ascii_component_length(&root.0);
+    let destination = root.0.join("d".repeat(component_length));
+    let bytes = b"near-limit complete output";
+
+    validate_destination(&InputPolicy::new(vec![root.0.clone()]), &destination)
+        .expect("near-limit destination is pinned beneath the allowed root")
+        .publish_no_overwrite(bytes)
+        .expect("a legal near-limit component is published");
+
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert_no_staging_residue(&root.0);
 }
 
 #[test]

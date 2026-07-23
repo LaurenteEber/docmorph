@@ -12,7 +12,7 @@ use docmorph_contracts::{
     AdapterIdentity, ContractVersion, Diagnostic, ExecutionBounds, MetricAvailability, Operation,
     OperationKind, Provenance,
 };
-use docmorph_core::{Adapter, InputPolicy, Lifecycle, MockAdapter};
+use docmorph_core::{Adapter, InputPolicy, Lifecycle, MockAdapter, Registry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -31,6 +31,7 @@ struct ManifestFixture {
     output: PathBuf,
     allowed_roots: Vec<PathBuf>,
     expected_outcome: ExpectedOutcome,
+    expected_diagnostic_code: Option<String>,
     provenance: Provenance,
 }
 
@@ -43,10 +44,12 @@ enum ExpectedOutcome {
 
 #[derive(Serialize)]
 struct Receipt {
+    schema_version: &'static str,
     command: Vec<String>,
     manifest_sha256: String,
     contract_version: ContractVersion,
     toolchain: Toolchain,
+    build_compiler: BuildCompiler,
     platform: Platform,
     adapter: AdapterIdentity,
     outcomes: Vec<FixtureOutcome>,
@@ -57,19 +60,27 @@ struct Receipt {
 
 #[derive(Serialize)]
 struct SemanticReceipt<'a> {
-    command: &'a [String],
     manifest_sha256: &'a str,
     contract_version: ContractVersion,
     toolchain: &'a Toolchain,
+    build_compiler: &'a BuildCompiler,
     platform: &'a Platform,
     adapter: &'a AdapterIdentity,
-    outcomes: &'a [FixtureOutcome],
+    outcomes: Vec<SemanticFixtureOutcome<'a>>,
     peak_memory_bytes: &'a MetricAvailability,
 }
 
 #[derive(Serialize)]
 struct Toolchain {
     rust_version: String,
+}
+
+#[derive(Serialize)]
+struct BuildCompiler {
+    release: &'static str,
+    commit_hash: &'static str,
+    host: &'static str,
+    llvm_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -84,8 +95,20 @@ struct FixtureOutcome {
     id: String,
     fixture_sha256: Option<String>,
     outcome: ExpectedOutcome,
+    expected_diagnostic_code: Option<String>,
     diagnostics: Vec<Diagnostic>,
     artifact: Option<Artifact>,
+}
+
+#[derive(Serialize)]
+struct SemanticFixtureOutcome<'a> {
+    id: &'a str,
+    fixture_sha256: &'a Option<String>,
+    outcome: ExpectedOutcome,
+    expected_diagnostic_code: &'a Option<String>,
+    primary_diagnostic_code: Option<&'a str>,
+    artifact_byte_len: Option<u64>,
+    artifact_sha256: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -111,12 +134,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let arguments = parse_arguments(env::args().skip(1))?;
+    let command = env::args().collect::<Vec<_>>();
+    let arguments = parse_arguments(command.iter().skip(1).cloned())?;
     let started = Instant::now();
     let manifest_bytes = fs::read(&arguments.manifest)
         .map_err(|error| format!("manifest cannot be read: {error}"))?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("manifest is invalid JSON: {error}"))?;
+    validate_manifest(&manifest)?;
     let fixture_root = arguments
         .manifest
         .parent()
@@ -132,13 +157,14 @@ fn run() -> Result<(), String> {
         .iter()
         .map(|fixture| run_fixture(fixture, fixture_root, &artifact_root, &manifest, &mock))
         .collect::<Result<Vec<_>, _>>()?;
-    let command = vec![
-        "docmorph-evidence".into(),
-        "--manifest".into(),
-        arguments.manifest.display().to_string(),
-    ];
     let toolchain = Toolchain {
         rust_version: env!("CARGO_PKG_RUST_VERSION").into(),
+    };
+    let build_compiler = BuildCompiler {
+        release: env!("DOCMORPH_BUILD_RUSTC_RELEASE"),
+        commit_hash: env!("DOCMORPH_BUILD_RUSTC_COMMIT"),
+        host: env!("DOCMORPH_BUILD_RUSTC_HOST"),
+        llvm_version: env!("DOCMORPH_BUILD_RUSTC_LLVM"),
     };
     let platform = Platform {
         family: env::consts::FAMILY.into(),
@@ -150,13 +176,13 @@ fn run() -> Result<(), String> {
     };
     let manifest_sha256 = sha256(&manifest_bytes);
     let semantic = SemanticReceipt {
-        command: &command,
         manifest_sha256: &manifest_sha256,
         contract_version: manifest.contract_version,
         toolchain: &toolchain,
+        build_compiler: &build_compiler,
         platform: &platform,
         adapter: &adapter,
-        outcomes: &outcomes,
+        outcomes: outcomes.iter().map(semantic_outcome).collect(),
         peak_memory_bytes: &peak_memory_bytes,
     };
     let semantic_sha256 = sha256(
@@ -164,10 +190,12 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("receipt cannot serialize: {error}"))?,
     );
     let receipt = Receipt {
+        schema_version: "1.1",
         command,
         manifest_sha256,
         contract_version: manifest.contract_version,
         toolchain,
+        build_compiler,
         platform,
         adapter,
         outcomes,
@@ -206,7 +234,10 @@ fn run_fixture(
         bounds: ExecutionBounds::default(),
         provenance: fixture.provenance.clone(),
     };
-    let lifecycle = Lifecycle::new(InputPolicy::new(roots), Arc::clone(mock));
+    let lifecycle = Lifecycle::new(
+        InputPolicy::new(roots),
+        Registry::new(vec![Arc::clone(mock) as Arc<dyn Adapter>]),
+    );
     let result = lifecycle.submit(&operation, &input, &destination);
     let (outcome, fixture_sha256, diagnostics, artifact) = match result {
         Ok(result) => (
@@ -232,13 +263,72 @@ fn run_fixture(
             fixture.id
         ));
     }
+    if matches!(outcome, ExpectedOutcome::Failure) {
+        let actual = diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .ok_or_else(|| format!("fixture `{}` failure had no diagnostic", fixture.id))?;
+        let expected = fixture.expected_diagnostic_code.as_deref().ok_or_else(|| {
+            format!(
+                "fixture `{}` failure requires expected_diagnostic_code",
+                fixture.id
+            )
+        })?;
+        if actual != expected {
+            return Err(format!(
+                "fixture `{}` diagnostic `{actual}` did not match expected `{expected}`",
+                fixture.id
+            ));
+        }
+    }
     Ok(FixtureOutcome {
         id: fixture.id.clone(),
         fixture_sha256,
         outcome,
+        expected_diagnostic_code: fixture.expected_diagnostic_code.clone(),
         diagnostics,
         artifact,
     })
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
+    for fixture in &manifest.fixtures {
+        match (fixture.expected_outcome, &fixture.expected_diagnostic_code) {
+            (ExpectedOutcome::Failure, Some(code)) if !code.is_empty() => {}
+            (ExpectedOutcome::Failure, _) => {
+                return Err(format!(
+                    "fixture `{}` failure requires expected_diagnostic_code",
+                    fixture.id
+                ));
+            }
+            (ExpectedOutcome::Success, None) => {}
+            (ExpectedOutcome::Success, _) => {
+                return Err(format!(
+                    "fixture `{}` success must not declare expected_diagnostic_code",
+                    fixture.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn semantic_outcome(outcome: &FixtureOutcome) -> SemanticFixtureOutcome<'_> {
+    SemanticFixtureOutcome {
+        id: &outcome.id,
+        fixture_sha256: &outcome.fixture_sha256,
+        outcome: outcome.outcome,
+        expected_diagnostic_code: &outcome.expected_diagnostic_code,
+        primary_diagnostic_code: outcome
+            .diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        artifact_byte_len: outcome.artifact.as_ref().map(|artifact| artifact.byte_len),
+        artifact_sha256: outcome
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.sha256.as_str()),
+    }
 }
 
 fn parse_arguments(arguments: impl Iterator<Item = String>) -> Result<Arguments, String> {
