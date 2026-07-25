@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "catalog_id": "docmorph-phase1-synthetic-smoke",
+  "fixtures": [
+    {
+      "id": "policy-failure",
+      "path": "fixtures/mock/policy-failure-input.txt",
+      "sha256": "cd900a94480640cd33ad68989357ddbd7b48ecb5a6aed799d282c6f292300aff",
+      "format": "mock_text", "category": "input_policy_failure_smoke",
+      "characteristics": ["smoke_only", "synthetic"],
+      "provenance": { "assertion": "project_authored_synthetic", "source": "DocMorph repository fixture" },
+      "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
+      "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
+      "comparison_intent": "diagnostic_exact", "determinism_intent": "semantic_receipt_same_environment"
+    },
+    {
+      "id": "success",
+      "path": "fixtures/mock/success-input.txt",
+      "sha256": "1ed9448827a825b8b993476b9969c65338d6566c7796bf3a01ca49bccda8cc90",
+      "format": "mock_text", "category": "harness_success_smoke",
+      "characteristics": ["smoke_only", "synthetic"],
+      "provenance": { "assertion": "project_authored_synthetic", "source": "DocMorph repository fixture" },
+      "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
+      "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
+      "comparison_intent": "byte_exact", "determinism_intent": "semantic_receipt_same_environment"
+    }
+  ]
+}

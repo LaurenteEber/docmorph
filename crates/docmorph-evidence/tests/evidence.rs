@@ -8,6 +8,9 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+#[path = "../src/catalog.rs"]
+mod catalog;
+
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TempRoot(PathBuf);
@@ -225,4 +228,135 @@ fn disallowed_directory_fixture_is_rejected_without_harness_read_or_hash() {
     assert!(receipt["outcomes"][0]["fixture_sha256"].is_null());
     assert!(receipt["outcomes"][0]["artifact"].is_null());
     assert_eq!(receipt["schema_version"], "1.1");
+}
+
+fn catalog_entry(id: &str, path: &str, sha256: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","path":"{path}","sha256":"{sha256}","format":"mock_text","category":"harness_success_smoke","characteristics":["synthetic","smoke_only"],"provenance":{{"assertion":"project_authored_synthetic","source":"repository fixture"}},"license":{{"assertion":"workspace_license","expression":"MIT"}},"sensitivity":"synthetic_non_sensitive","distribution":"repository_allowed","comparison_intent":"byte_exact","determinism_intent":"semantic_receipt_same_environment"}}"#
+    )
+}
+
+fn catalog_document(entries: &[String]) -> String {
+    format!(
+        r#"{{"schema_version":"1.0","catalog_id":"smoke","fixtures":[{}]}}"#,
+        entries.join(",")
+    )
+}
+#[test]
+fn catalog_without_baseline_claims_is_canonical_and_relocatable() {
+    let root = TempRoot::new();
+    let fixture = root.0.join("fixtures/mock/input.txt");
+    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+    fs::write(&fixture, b"input").unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"input"));
+    let first = catalog_document(&[
+        catalog_entry("a", "fixtures/mock/input.txt", &digest),
+        catalog_entry("b", "fixtures/mock/input.txt", &digest),
+    ]);
+    let reordered = format!(
+        r#"{{"fixtures":[{},{}],"catalog_id":"smoke","schema_version":"1.0"}}"#,
+        catalog_entry("b", "fixtures/mock/input.txt", &digest).replace(
+            "[\"synthetic\",\"smoke_only\"]",
+            "[\"smoke_only\",\"synthetic\"]"
+        ),
+        catalog_entry("a", "fixtures/mock/input.txt", &digest),
+    );
+    let first = catalog::validate_catalog_bytes(first.as_bytes(), &root.0).unwrap();
+    let second = catalog::validate_catalog_bytes(reordered.as_bytes(), &root.0).unwrap();
+    assert_eq!(first.catalog_id, "smoke");
+    assert_eq!(first.revision_sha256, second.revision_sha256);
+}
+#[test]
+fn catalog_rejects_schema_duplicate_and_metadata_errors_in_order() {
+    let root = TempRoot::new();
+    let entry = catalog_entry("duplicate", "../escape", "bad")
+        .replace("synthetic_non_sensitive", "restricted");
+    let errors = catalog::validate_catalog_bytes(
+        catalog_document(&[entry.clone(), entry]).as_bytes(),
+        &root.0,
+    )
+    .unwrap_err();
+    assert_eq!(
+        errors.codes(),
+        vec![
+            "distribution_incompatible_with_sensitivity",
+            "distribution_incompatible_with_sensitivity",
+            "duplicate_fixture_id",
+            "path_not_repository_relative",
+            "path_not_repository_relative",
+            "sha256_invalid",
+            "sha256_invalid"
+        ]
+    );
+    for (document, code) in [
+        (
+            r#"{"schema_version":"2.0","catalog_id":"x","fixtures":[]}"#,
+            "unsupported_schema_version",
+        ),
+        (
+            r#"{"schema_version":"1.0","catalog_id":"x","fixtures":[],"unknown":true}"#,
+            "catalog_schema_invalid",
+        ),
+        ("{", "catalog_schema_invalid"),
+    ] {
+        assert_eq!(
+            catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+                .unwrap_err()
+                .codes(),
+            vec![code]
+        );
+    }
+}
+#[test]
+fn catalog_confines_fixture_reads_and_checks_digest() {
+    let root = TempRoot::new();
+    let outside = TempRoot::new();
+    let fixture = root.0.join("fixtures/mock/input.txt");
+    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+    fs::write(&fixture, b"input").unwrap();
+    fs::create_dir(root.0.join("fixtures/mock/directory")).unwrap();
+    fs::write(outside.0.join("outside.txt"), b"outside").unwrap();
+    std::os::unix::fs::symlink(
+        outside.0.join("outside.txt"),
+        root.0.join("fixtures/mock/escape.txt"),
+    )
+    .unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"input"));
+    for (path, sha256, code) in [
+        (
+            "fixtures/mock/missing.txt",
+            digest.as_str(),
+            "fixture_missing",
+        ),
+        (
+            "fixtures/mock/directory",
+            digest.as_str(),
+            "fixture_not_regular_file",
+        ),
+        (
+            "fixtures/mock/escape.txt",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "path_escapes_repository",
+        ),
+        (
+            "fixtures/mock/input.txt",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "sha256_mismatch",
+        ),
+        ("fixtures/mock/input.txt", "00", "sha256_invalid"),
+    ] {
+        let error = catalog::validate_catalog_bytes(
+            catalog_document(&[catalog_entry("fixture", path, sha256)]).as_bytes(),
+            &root.0,
+        )
+        .unwrap_err();
+        assert_eq!(error.codes(), vec![code]);
+    }
+}
+#[test]
+fn catalog_distinguishes_oversized_fixture_input() {
+    assert_eq!(
+        catalog::fixture_input_code("input_too_large"),
+        "fixture_too_large"
+    );
 }
