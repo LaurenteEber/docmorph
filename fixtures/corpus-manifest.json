@@ -12,7 +12,7 @@
       "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
       "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
       "comparison_intent": "diagnostic_exact", "determinism_intent": "semantic_receipt_same_environment",
-      "baseline": { "operation_manifest": "fixtures/evidence-policy-failure-manifest.json", "retained_receipt": "evidence/policy-failure/receipt.json", "semantic_sha256": "2508c0ea84e89c12ca69266714d3d2bde74a511e56fcc83961d7ed22070f685e" }
+      "baseline": { "operation_manifest": "fixtures/evidence-policy-failure-manifest.json", "retained_receipt": "evidence/policy-failure/receipt.json", "semantic_sha256": "d00cfaf50baa0c27b7ffd4eaaf153860506fd5399d069a1ccece3e9dcd477f3a" }
     },
     {
       "id": "success",
@@ -24,7 +24,7 @@
       "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
       "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
       "comparison_intent": "byte_exact", "determinism_intent": "semantic_receipt_same_environment",
-      "baseline": { "operation_manifest": "fixtures/evidence-success-manifest.json", "retained_receipt": "evidence/success/receipt.json", "semantic_sha256": "368523caee8f3c50fcfd8bd7172b0f4daa74b2645cc7ad6cf2104e876cc06f6e" }
+      "baseline": { "operation_manifest": "fixtures/evidence-success-manifest.json", "retained_receipt": "evidence/success/receipt.json", "semantic_sha256": "0bbfed8f5855a38169f3d7f41eaec3ddb21a2a603177f5443537cbebb643ad79" }
     }
   ]
 }
