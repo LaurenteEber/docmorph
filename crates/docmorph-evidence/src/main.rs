@@ -1,5 +1,8 @@
 //! Manifest-driven evidence receipts for deterministic local mock fixtures.
 
+#[allow(dead_code)]
+mod catalog;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
