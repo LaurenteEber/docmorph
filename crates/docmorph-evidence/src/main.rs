@@ -1,5 +1,8 @@
 //! Manifest-driven evidence receipts for deterministic local mock fixtures.
 
+#[allow(dead_code)]
+mod catalog;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -45,6 +48,8 @@ enum ExpectedOutcome {
 #[derive(Serialize)]
 struct Receipt {
     schema_version: &'static str,
+    catalog_id: String,
+    catalog_revision_sha256: String,
     command: Vec<String>,
     manifest_sha256: String,
     contract_version: ContractVersion,
@@ -60,6 +65,8 @@ struct Receipt {
 
 #[derive(Serialize)]
 struct SemanticReceipt<'a> {
+    catalog_id: &'a str,
+    catalog_revision_sha256: &'a str,
     manifest_sha256: &'a str,
     contract_version: ContractVersion,
     toolchain: &'a Toolchain,
@@ -121,6 +128,8 @@ struct Artifact {
 struct Arguments {
     manifest: PathBuf,
     receipt_dir: PathBuf,
+    catalog: PathBuf,
+    repository_root: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -136,6 +145,13 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let command = env::args().collect::<Vec<_>>();
     let arguments = parse_arguments(command.iter().skip(1).cloned())?;
+    let catalog_bytes =
+        fs::read(&arguments.catalog).map_err(|_| "catalog_unreadable".to_owned())?;
+    if !arguments.repository_root.is_dir() {
+        return Err("catalog_invalid:repository_root_invalid".to_owned());
+    }
+    let catalog = catalog::validate_catalog_bytes(&catalog_bytes, &arguments.repository_root)
+        .map_err(|errors| format!("catalog_invalid:{}", errors.codes()[0]))?;
     let started = Instant::now();
     let manifest_bytes = fs::read(&arguments.manifest)
         .map_err(|error| format!("manifest cannot be read: {error}"))?;
@@ -176,6 +192,8 @@ fn run() -> Result<(), String> {
     };
     let manifest_sha256 = sha256(&manifest_bytes);
     let semantic = SemanticReceipt {
+        catalog_id: &catalog.catalog_id,
+        catalog_revision_sha256: &catalog.execution_revision_sha256,
         manifest_sha256: &manifest_sha256,
         contract_version: manifest.contract_version,
         toolchain: &toolchain,
@@ -190,7 +208,9 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("receipt cannot serialize: {error}"))?,
     );
     let receipt = Receipt {
-        schema_version: "1.1",
+        schema_version: "1.2",
+        catalog_id: catalog.catalog_id,
+        catalog_revision_sha256: catalog.execution_revision_sha256,
         command,
         manifest_sha256,
         contract_version: manifest.contract_version,
@@ -335,19 +355,26 @@ fn parse_arguments(arguments: impl Iterator<Item = String>) -> Result<Arguments,
     let mut arguments = arguments;
     let mut manifest = None;
     let mut receipt_dir = None;
+    let mut catalog = None;
+    let mut repository_root = None;
     while let Some(argument) = arguments.next() {
         let value = arguments
             .next()
-            .ok_or_else(|| format!("missing value for `{argument}`"))?;
+            .ok_or_else(|| format!("argument_value_missing:{argument}"))?;
         match argument.as_str() {
             "--manifest" => manifest = Some(value.into()),
             "--receipt-dir" => receipt_dir = Some(value.into()),
-            _ => return Err(format!("unknown argument `{argument}`")),
+            "--catalog" => catalog = Some(value.into()),
+            "--repository-root" => repository_root = Some(value.into()),
+            _ => return Err(format!("argument_unknown:{argument}")),
         }
     }
     Ok(Arguments {
-        manifest: manifest.ok_or_else(|| "missing `--manifest`".to_owned())?,
-        receipt_dir: receipt_dir.ok_or_else(|| "missing `--receipt-dir`".to_owned())?,
+        manifest: manifest.ok_or_else(|| "argument_missing:--manifest".to_owned())?,
+        receipt_dir: receipt_dir.ok_or_else(|| "argument_missing:--receipt-dir".to_owned())?,
+        catalog: catalog.ok_or_else(|| "argument_missing:--catalog".to_owned())?,
+        repository_root: repository_root
+            .ok_or_else(|| "argument_missing:--repository-root".to_owned())?,
     })
 }
 

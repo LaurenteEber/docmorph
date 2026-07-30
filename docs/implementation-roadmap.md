@@ -54,6 +54,12 @@ The harness must execute each candidate against the same named corpus revision a
 
 Run each determinism case repeatedly under the same pinned environment. Record PDF byte equality separately from visual or structural equality; no byte-determinism claim follows from a visually stable result.
 
+### Governed receipt reproduction
+
+The current mock evidence harness requires `--manifest`, `--receipt-dir`, `--catalog`, and `--repository-root`. From a clean checkout, run the same manifest twice with two distinct fresh receipt directories and validate `fixtures/corpus-manifest.json`; the generated `semantic_sha256` values must match. Compare a generated hash with the matching retained receipt only when `build_compiler` and `platform` provenance match. A provenance mismatch makes no retained-equality claim and does not regenerate retained evidence. A successful governed receipt uses schema `1.2`; its `catalog_id` and `catalog_revision_sha256` bind it to the validated catalog and its canonical execution revision.
+
+This is a semantic comparison procedure. It does not claim equality of receipt bytes, paths, or timestamps. Retained receipt/catalog links remain graph-validated; the procedure does not broaden lifecycle policy, public contracts, fixture content, engine capability, or ad-hoc manifest membership behavior.
+
 ## Phase 2: Isolated Engine Spikes
 
 Spike two or three candidates with permissive licenses. Begin with the candidates named in ADR 0004, including `pdfium-render` 0.9.3 as a pre-1.0 spike candidate and `lopdf`; introduce a third candidate only when it provides a meaningful comparison. Evaluate an isolated Python worker only if Rust/native candidates leave a documented gap worth its packaging and observability cost.
