@@ -45,9 +45,32 @@ fn run(manifest_path: &std::path::Path, receipt_dir: &std::path::Path) -> Output
             manifest_path.to_str().unwrap(),
             "--receipt-dir",
             receipt_dir.to_str().unwrap(),
+            "--catalog",
+            catalog().to_str().unwrap(),
+            "--repository-root",
+            repository_root().to_str().unwrap(),
         ])
         .output()
         .expect("evidence binary spawns")
+}
+
+fn run_arguments(arguments: &[PathBuf]) -> Output {
+    let arguments = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    Command::new(env!("CARGO_BIN_EXE_docmorph-evidence"))
+        .args(arguments)
+        .output()
+        .expect("evidence binary spawns")
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn catalog() -> PathBuf {
+    repository_root().join("fixtures/corpus-manifest.json")
 }
 
 fn field_value(receipt: &str, field: &str) -> String {
@@ -61,6 +84,153 @@ fn field_value(receipt: &str, field: &str) -> String {
         .expect("string field is terminated")
         .0
         .into()
+}
+
+#[test]
+fn governed_preflight_rejects_invalid_inputs_before_output_side_effects() {
+    let root = TempRoot::new();
+    let manifest_path = manifest();
+    let catalog_path = catalog();
+    let repository_root = repository_root();
+    let invalid_root = root.0.join("not-a-directory");
+    let malformed_catalog = root.0.join("malformed.json");
+    let baseline_invalid_catalog = root.0.join("baseline-invalid.json");
+    fs::write(&invalid_root, b"not a directory").unwrap();
+    fs::write(&malformed_catalog, b"{").unwrap();
+    fs::create_dir_all(root.0.join("fixtures")).unwrap();
+    fs::write(root.0.join("fixtures/input.txt"), b"input").unwrap();
+    fs::write(
+        &baseline_invalid_catalog,
+        catalog_document(&[baseline_entry(
+            "fixture",
+            &format!("{:x}", Sha256::digest(b"input")),
+        )]),
+    )
+    .unwrap();
+
+    let cases: Vec<(Vec<PathBuf>, &str)> = vec![
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("missing-catalog"),
+                "--repository-root".into(),
+                repository_root.clone(),
+            ],
+            "argument_missing:--catalog",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("missing-value"),
+                "--catalog".into(),
+            ],
+            "argument_value_missing:--catalog",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("missing-root"),
+                "--catalog".into(),
+                catalog_path.clone(),
+            ],
+            "argument_missing:--repository-root",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("missing-root-value"),
+                "--catalog".into(),
+                catalog_path.clone(),
+                "--repository-root".into(),
+            ],
+            "argument_value_missing:--repository-root",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("unreadable-catalog"),
+                "--catalog".into(),
+                root.0.join("missing.json"),
+                "--repository-root".into(),
+                repository_root.clone(),
+            ],
+            "catalog_unreadable",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("invalid-root"),
+                "--catalog".into(),
+                catalog_path.clone(),
+                "--repository-root".into(),
+                invalid_root.clone(),
+            ],
+            "catalog_invalid:repository_root_invalid",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("incompatible-root"),
+                "--catalog".into(),
+                catalog_path.clone(),
+                "--repository-root".into(),
+                root.0.clone(),
+            ],
+            "catalog_invalid:fixture_missing",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path.clone(),
+                "--receipt-dir".into(),
+                root.0.join("malformed-catalog"),
+                "--catalog".into(),
+                malformed_catalog.clone(),
+                "--repository-root".into(),
+                repository_root.clone(),
+            ],
+            "catalog_invalid:catalog_schema_invalid",
+        ),
+        (
+            vec![
+                "--manifest".into(),
+                manifest_path,
+                "--receipt-dir".into(),
+                root.0.join("baseline-invalid-catalog"),
+                "--catalog".into(),
+                baseline_invalid_catalog,
+                "--repository-root".into(),
+                root.0.clone(),
+            ],
+            "catalog_invalid:baseline_manifest_missing",
+        ),
+    ];
+
+    for (arguments, key) in cases {
+        let receipt_dir = &arguments[3];
+        let output = run_arguments(&arguments);
+        assert_eq!(output.status.code(), Some(2), "{key}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("docmorph-evidence: {key}\n")
+        );
+        assert!(!receipt_dir.join("receipt.json").exists(), "{key}");
+        assert!(!receipt_dir.join("artifacts").exists(), "{key}");
+    }
 }
 
 #[test]
@@ -151,6 +321,10 @@ fn receipt_command_records_each_requested_manifest_path() {
                 manifest_path.to_string_lossy(),
                 "--receipt-dir",
                 receipt_dir.to_string_lossy(),
+                "--catalog",
+                catalog().to_string_lossy(),
+                "--repository-root",
+                repository_root().to_string_lossy(),
             ])
         );
         assert_eq!(receipt["schema_version"], "1.1");
