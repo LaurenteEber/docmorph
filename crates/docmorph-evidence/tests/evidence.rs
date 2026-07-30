@@ -64,6 +64,24 @@ fn run_with_catalog(
         .expect("evidence binary spawns")
 }
 
+fn governed_reproduction_semantic_hashes(
+    manifest_path: &std::path::Path,
+    first_receipt_dir: &std::path::Path,
+    second_receipt_dir: &std::path::Path,
+) -> [String; 2] {
+    assert_eq!(run(manifest_path, first_receipt_dir).status.code(), Some(0));
+    assert_eq!(
+        run(manifest_path, second_receipt_dir).status.code(),
+        Some(0)
+    );
+    [first_receipt_dir, second_receipt_dir].map(|receipt_dir| {
+        field_value(
+            &fs::read_to_string(receipt_dir.join("receipt.json")).unwrap(),
+            "semantic_sha256",
+        )
+    })
+}
+
 fn run_arguments(arguments: &[PathBuf]) -> Output {
     let arguments = arguments
         .iter()
@@ -427,6 +445,26 @@ fn deterministic_mock_runs_keep_the_same_semantic_receipt_identity() {
     let second: serde_json::Value = serde_json::from_str(&second_receipt).unwrap();
     assert_ne!(first["command"], second["command"]);
     assert_ne!(field_value(&first_receipt, "semantic_sha256"), "");
+}
+
+#[test]
+fn governed_reproduction_matches_retained_semantic_identity() {
+    let first = TempRoot::new();
+    let second = TempRoot::new();
+    let manifest = repository_root().join("fixtures/evidence-success-manifest.json");
+    let retained = repository_root().join("evidence/success/receipt.json");
+
+    let reproduced = governed_reproduction_semantic_hashes(&manifest, &first.0, &second.0);
+    let retained = field_value(&fs::read_to_string(retained).unwrap(), "semantic_sha256");
+
+    assert_eq!(
+        reproduced[0], reproduced[1],
+        "semantic comparison only; byte, path, and timestamp equality are not asserted"
+    );
+    assert_eq!(
+        reproduced[0], retained,
+        "semantic comparison only; byte, path, and timestamp equality are not asserted"
+    );
 }
 
 #[test]
