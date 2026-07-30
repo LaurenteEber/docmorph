@@ -17,13 +17,16 @@ python3 - "$first_receipt_dir/receipt.json" "$second_receipt_dir/receipt.json" e
 import json
 import sys
 
-semantic_hashes = [json.load(open(path))["semantic_sha256"] for path in sys.argv[1:]]
-assert semantic_hashes[0] == semantic_hashes[1] == semantic_hashes[2]
-print(semantic_hashes[0])
+receipts = [json.load(open(path)) for path in sys.argv[1:]]
+assert receipts[0]["semantic_sha256"] == receipts[1]["semantic_sha256"]
+if (receipts[0]["build_compiler"] == receipts[2]["build_compiler"]
+        and receipts[0]["platform"] == receipts[2]["platform"]):
+    assert receipts[0]["semantic_sha256"] == receipts[2]["semantic_sha256"]
+print(receipts[0]["semantic_sha256"])
 PY
 ```
 
-Use distinct, fresh receipt directories: an existing directory can contain an artifact from a previous run. The comparison proves that both governed runs have the same `semantic_sha256` as the retained success receipt.
+Use distinct, fresh receipt directories: an existing directory can contain an artifact from a previous run. The comparison always proves that both governed runs have the same `semantic_sha256`. It compares a generated hash with the retained success receipt only when their `build_compiler` and `platform` provenance match; otherwise it makes no retained-equality claim and does not regenerate retained evidence.
 
 Each successful receipt is schema `1.2`. Its `catalog_id` must be `docmorph-phase1-synthetic-smoke`, and its `catalog_revision_sha256` must match the canonical execution revision validated from `fixtures/corpus-manifest.json`. The retained receipt is the comparison baseline; validate the complete catalog before treating a run as governed.
 

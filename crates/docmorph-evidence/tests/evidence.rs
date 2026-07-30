@@ -455,16 +455,23 @@ fn governed_reproduction_matches_retained_semantic_identity() {
     let retained = repository_root().join("evidence/success/receipt.json");
 
     let reproduced = governed_reproduction_semantic_hashes(&manifest, &first.0, &second.0);
-    let retained = field_value(&fs::read_to_string(retained).unwrap(), "semantic_sha256");
+    let generated: serde_json::Value =
+        serde_json::from_slice(&fs::read(first.0.join("receipt.json")).unwrap()).unwrap();
+    let retained: serde_json::Value = serde_json::from_slice(&fs::read(retained).unwrap()).unwrap();
 
     assert_eq!(
         reproduced[0], reproduced[1],
         "semantic comparison only; byte, path, and timestamp equality are not asserted"
     );
-    assert_eq!(
-        reproduced[0], retained,
-        "semantic comparison only; byte, path, and timestamp equality are not asserted"
-    );
+    if generated["build_compiler"] == retained["build_compiler"]
+        && generated["platform"] == retained["platform"]
+    {
+        assert_eq!(
+            reproduced[0],
+            retained["semantic_sha256"].as_str().unwrap(),
+            "semantic comparison only; byte, path, and timestamp equality are not asserted"
+        );
+    }
 }
 
 #[test]

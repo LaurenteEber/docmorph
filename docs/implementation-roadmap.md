@@ -56,7 +56,7 @@ Run each determinism case repeatedly under the same pinned environment. Record P
 
 ### Governed receipt reproduction
 
-The current mock evidence harness requires `--manifest`, `--receipt-dir`, `--catalog`, and `--repository-root`. From a clean checkout, run the same manifest twice with two distinct fresh receipt directories, validate `fixtures/corpus-manifest.json`, and compare each generated `semantic_sha256` with the matching retained receipt. A successful governed receipt uses schema `1.2`; its `catalog_id` and `catalog_revision_sha256` bind it to the validated catalog and its canonical execution revision.
+The current mock evidence harness requires `--manifest`, `--receipt-dir`, `--catalog`, and `--repository-root`. From a clean checkout, run the same manifest twice with two distinct fresh receipt directories and validate `fixtures/corpus-manifest.json`; the generated `semantic_sha256` values must match. Compare a generated hash with the matching retained receipt only when `build_compiler` and `platform` provenance match. A provenance mismatch makes no retained-equality claim and does not regenerate retained evidence. A successful governed receipt uses schema `1.2`; its `catalog_id` and `catalog_revision_sha256` bind it to the validated catalog and its canonical execution revision.
 
 This is a semantic comparison procedure. It does not claim equality of receipt bytes, paths, or timestamps. Retained receipt/catalog links remain graph-validated; the procedure does not broaden lifecycle policy, public contracts, fixture content, engine capability, or ad-hoc manifest membership behavior.
 
