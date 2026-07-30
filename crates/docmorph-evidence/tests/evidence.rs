@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use docmorph_contracts::{AdapterIdentity, ContractVersion, Diagnostic, MetricAvailability};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[path = "../src/catalog.rs"]
@@ -39,6 +41,14 @@ fn manifest() -> PathBuf {
 }
 
 fn run(manifest_path: &std::path::Path, receipt_dir: &std::path::Path) -> Output {
+    run_with_catalog(manifest_path, receipt_dir, &catalog())
+}
+
+fn run_with_catalog(
+    manifest_path: &std::path::Path,
+    receipt_dir: &std::path::Path,
+    catalog_path: &std::path::Path,
+) -> Output {
     Command::new(env!("CARGO_BIN_EXE_docmorph-evidence"))
         .args([
             "--manifest",
@@ -46,7 +56,7 @@ fn run(manifest_path: &std::path::Path, receipt_dir: &std::path::Path) -> Output
             "--receipt-dir",
             receipt_dir.to_str().unwrap(),
             "--catalog",
-            catalog().to_str().unwrap(),
+            catalog_path.to_str().unwrap(),
             "--repository-root",
             repository_root().to_str().unwrap(),
         ])
@@ -84,6 +94,92 @@ fn field_value(receipt: &str, field: &str) -> String {
         .expect("string field is terminated")
         .0
         .into()
+}
+
+#[derive(Clone, Deserialize)]
+#[rustfmt::skip]
+struct ReceiptView { catalog_id: String, catalog_revision_sha256: String, manifest_sha256: String, contract_version: ContractVersion, toolchain: Toolchain, build_compiler: BuildCompiler, platform: Platform, adapter: AdapterIdentity, outcomes: Vec<FixtureReceipt>, peak_memory_bytes: MetricAvailability }
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Toolchain {
+    rust_version: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct BuildCompiler {
+    release: String,
+    commit_hash: String,
+    host: String,
+    llvm_version: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Platform {
+    family: String,
+    os: String,
+    arch: String,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    Success,
+    Failure,
+}
+
+#[derive(Clone, Deserialize)]
+#[rustfmt::skip]
+struct FixtureReceipt { id: String, fixture_sha256: Option<String>, outcome: Outcome, expected_diagnostic_code: Option<String>, diagnostics: Vec<Diagnostic>, artifact: Option<Artifact> }
+
+#[derive(Clone, Deserialize)]
+struct Artifact {
+    byte_len: u64,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+#[rustfmt::skip]
+struct SemanticReceipt<'a> { catalog_id: &'a str, catalog_revision_sha256: &'a str, manifest_sha256: &'a str, contract_version: ContractVersion, toolchain: &'a Toolchain, build_compiler: &'a BuildCompiler, platform: &'a Platform, adapter: &'a AdapterIdentity, outcomes: Vec<SemanticFixtureReceipt<'a>>, peak_memory_bytes: &'a MetricAvailability }
+
+#[derive(Serialize)]
+#[rustfmt::skip]
+struct SemanticFixtureReceipt<'a> { id: &'a str, fixture_sha256: &'a Option<String>, outcome: Outcome, expected_diagnostic_code: &'a Option<String>, primary_diagnostic_code: Option<&'a str>, artifact_byte_len: Option<u64>, artifact_sha256: Option<&'a str> }
+
+fn semantic_sha256(receipt: &ReceiptView) -> String {
+    let semantic = SemanticReceipt {
+        catalog_id: &receipt.catalog_id,
+        catalog_revision_sha256: &receipt.catalog_revision_sha256,
+        manifest_sha256: &receipt.manifest_sha256,
+        contract_version: receipt.contract_version,
+        toolchain: &receipt.toolchain,
+        build_compiler: &receipt.build_compiler,
+        platform: &receipt.platform,
+        adapter: &receipt.adapter,
+        outcomes: receipt
+            .outcomes
+            .iter()
+            .map(|outcome| SemanticFixtureReceipt {
+                id: &outcome.id,
+                fixture_sha256: &outcome.fixture_sha256,
+                outcome: outcome.outcome,
+                expected_diagnostic_code: &outcome.expected_diagnostic_code,
+                primary_diagnostic_code: outcome
+                    .diagnostics
+                    .first()
+                    .map(|diagnostic| diagnostic.code.as_str()),
+                artifact_byte_len: outcome.artifact.as_ref().map(|artifact| artifact.byte_len),
+                artifact_sha256: outcome
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.sha256.as_str()),
+            })
+            .collect(),
+        peak_memory_bytes: &receipt.peak_memory_bytes,
+    };
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&semantic).unwrap())
+    )
 }
 
 #[test]
@@ -298,6 +394,77 @@ fn deterministic_mock_runs_keep_the_same_semantic_receipt_identity() {
 }
 
 #[test]
+fn governed_receipt_binds_catalog_identity_to_semantic_hash() {
+    let root = TempRoot::new();
+    let catalog_bytes = fs::read(catalog()).unwrap();
+    let alternate_id = root.0.join("alternate-id.json");
+    let alternate_revision = root.0.join("alternate-revision.json");
+    fs::write(
+        &alternate_id,
+        String::from_utf8(catalog_bytes.clone()).unwrap().replace(
+            "\"catalog_id\": \"docmorph-phase1-synthetic-smoke\"",
+            "\"catalog_id\": \"alternate\"",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &alternate_revision,
+        String::from_utf8(catalog_bytes.clone())
+            .unwrap()
+            .replace("DocMorph repository fixture", "alternate provenance"),
+    )
+    .unwrap();
+
+    let mut receipts = Vec::new();
+    for (name, catalog_path) in [
+        ("original", catalog()),
+        ("alternate-id", alternate_id),
+        ("alternate-revision", alternate_revision),
+    ] {
+        let receipt_dir = root.0.join(name);
+        assert_eq!(
+            run_with_catalog(&manifest(), &receipt_dir, &catalog_path)
+                .status
+                .code(),
+            Some(0)
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt_dir.join("receipt.json")).unwrap()).unwrap();
+        let validated =
+            catalog::validate_catalog_bytes(&fs::read(&catalog_path).unwrap(), &repository_root())
+                .unwrap();
+        assert_eq!(receipt["schema_version"], "1.2");
+        assert_eq!(receipt["catalog_id"], validated.catalog_id);
+        assert_eq!(
+            receipt["catalog_revision_sha256"],
+            validated.execution_revision_sha256
+        );
+        let receipt_bytes = fs::read_to_string(receipt_dir.join("receipt.json")).unwrap();
+        let receipt_view: ReceiptView = serde_json::from_str(&receipt_bytes).unwrap();
+        assert_eq!(
+            field_value(&receipt_bytes, "semantic_sha256"),
+            semantic_sha256(&receipt_view)
+        );
+        let mut different_catalog_id = receipt_view.clone();
+        different_catalog_id.catalog_id = "independent-catalog-id".into();
+        assert_ne!(
+            semantic_sha256(&receipt_view),
+            semantic_sha256(&different_catalog_id)
+        );
+        receipts.push(receipt);
+    }
+
+    assert_ne!(
+        receipts[0]["semantic_sha256"],
+        receipts[1]["semantic_sha256"]
+    );
+    assert_ne!(
+        receipts[0]["semantic_sha256"],
+        receipts[2]["semantic_sha256"]
+    );
+}
+
+#[test]
 fn receipt_command_records_each_requested_manifest_path() {
     let root = TempRoot::new();
     let manifest_contents = r#"{"contract_version":{"major":1,"minor":0},"fixtures":[]}"#;
@@ -327,7 +494,7 @@ fn receipt_command_records_each_requested_manifest_path() {
                 repository_root().to_string_lossy(),
             ])
         );
-        assert_eq!(receipt["schema_version"], "1.1");
+        assert_eq!(receipt["schema_version"], "1.2");
         for field in ["release", "commit_hash", "host", "llvm_version"] {
             assert!(
                 receipt["build_compiler"][field]
@@ -401,7 +568,7 @@ fn disallowed_directory_fixture_is_rejected_without_harness_read_or_hash() {
     );
     assert!(receipt["outcomes"][0]["fixture_sha256"].is_null());
     assert!(receipt["outcomes"][0]["artifact"].is_null());
-    assert_eq!(receipt["schema_version"], "1.1");
+    assert_eq!(receipt["schema_version"], "1.2");
 }
 
 fn catalog_entry(id: &str, path: &str, sha256: &str) -> String {
