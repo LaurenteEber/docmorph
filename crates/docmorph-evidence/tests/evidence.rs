@@ -64,6 +64,24 @@ fn run_with_catalog(
         .expect("evidence binary spawns")
 }
 
+fn governed_reproduction_semantic_hashes(
+    manifest_path: &std::path::Path,
+    first_receipt_dir: &std::path::Path,
+    second_receipt_dir: &std::path::Path,
+) -> [String; 2] {
+    assert_eq!(run(manifest_path, first_receipt_dir).status.code(), Some(0));
+    assert_eq!(
+        run(manifest_path, second_receipt_dir).status.code(),
+        Some(0)
+    );
+    [first_receipt_dir, second_receipt_dir].map(|receipt_dir| {
+        field_value(
+            &fs::read_to_string(receipt_dir.join("receipt.json")).unwrap(),
+            "semantic_sha256",
+        )
+    })
+}
+
 fn run_arguments(arguments: &[PathBuf]) -> Output {
     let arguments = arguments
         .iter()
@@ -81,6 +99,42 @@ fn repository_root() -> PathBuf {
 
 fn catalog() -> PathBuf {
     repository_root().join("fixtures/corpus-manifest.json")
+}
+
+fn retained_graph() -> TempRoot {
+    let root = TempRoot::new();
+    for path in [
+        "fixtures/corpus-manifest.json",
+        "fixtures/evidence-success-manifest.json",
+        "fixtures/evidence-policy-failure-manifest.json",
+        "fixtures/mock/success-input.txt",
+        "fixtures/mock/policy-failure-input.txt",
+        "evidence/success/receipt.json",
+        "evidence/policy-failure/receipt.json",
+    ] {
+        let destination = root.0.join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(repository_root().join(path), destination).unwrap();
+    }
+    root
+}
+
+fn bind_catalog_receipts(root: &std::path::Path, document: &str) {
+    let catalog: serde_json::Value = serde_json::from_str(document).unwrap();
+    let catalog_id = catalog["catalog_id"].as_str().unwrap();
+    let revision = catalog::execution_revision_for_catalog_bytes(document.as_bytes());
+    for fixture in catalog["fixtures"].as_array().unwrap() {
+        let Some(path) = fixture["baseline"]["retained_receipt"].as_str() else {
+            continue;
+        };
+        let path = root.join(path);
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        receipt["schema_version"] = "1.2".into();
+        receipt["catalog_id"] = catalog_id.into();
+        receipt["catalog_revision_sha256"] = revision.clone().into();
+        fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    }
 }
 
 fn field_value(receipt: &str, field: &str) -> String {
@@ -394,9 +448,41 @@ fn deterministic_mock_runs_keep_the_same_semantic_receipt_identity() {
 }
 
 #[test]
+fn governed_reproduction_matches_retained_semantic_identity() {
+    let first = TempRoot::new();
+    let second = TempRoot::new();
+    let manifest = repository_root().join("fixtures/evidence-success-manifest.json");
+    let retained = repository_root().join("evidence/success/receipt.json");
+
+    let reproduced = governed_reproduction_semantic_hashes(&manifest, &first.0, &second.0);
+    let generated: serde_json::Value =
+        serde_json::from_slice(&fs::read(first.0.join("receipt.json")).unwrap()).unwrap();
+    let retained: serde_json::Value = serde_json::from_slice(&fs::read(retained).unwrap()).unwrap();
+
+    assert_eq!(
+        reproduced[0], reproduced[1],
+        "semantic comparison only; byte, path, and timestamp equality are not asserted"
+    );
+    if generated["build_compiler"] == retained["build_compiler"]
+        && generated["platform"] == retained["platform"]
+    {
+        assert_eq!(
+            reproduced[0],
+            retained["semantic_sha256"].as_str().unwrap(),
+            "semantic comparison only; byte, path, and timestamp equality are not asserted"
+        );
+    }
+}
+
+#[test]
 fn governed_receipt_binds_catalog_identity_to_semantic_hash() {
     let root = TempRoot::new();
-    let catalog_bytes = fs::read(catalog()).unwrap();
+    let mut catalog_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(catalog()).unwrap()).unwrap();
+    for fixture in catalog_value["fixtures"].as_array_mut().unwrap() {
+        fixture.as_object_mut().unwrap().remove("baseline");
+    }
+    let catalog_bytes = serde_json::to_vec(&catalog_value).unwrap();
     let alternate_id = root.0.join("alternate-id.json");
     let alternate_revision = root.0.join("alternate-revision.json");
     fs::write(
@@ -462,6 +548,38 @@ fn governed_receipt_binds_catalog_identity_to_semantic_hash() {
         receipts[0]["semantic_sha256"],
         receipts[2]["semantic_sha256"]
     );
+}
+
+#[test]
+fn retained_graph_rejects_incomplete_or_mismatched_schema_1_2_bindings() {
+    #[rustfmt::skip]
+    let validate = |root: &TempRoot| catalog::validate_catalog_bytes(&fs::read(root.0.join("fixtures/corpus-manifest.json")).unwrap(), &root.0);
+    #[rustfmt::skip]
+    let receipt = |root: &TempRoot, fixture: &str| root.0.join(format!("evidence/{fixture}/receipt.json"));
+
+    #[rustfmt::skip]
+    let cases = [("catalog_id", None, "receipt_catalog_id_missing"), ("catalog_revision_sha256", None, "receipt_catalog_revision_sha256_missing"), ("schema_version", Some("1.1".to_owned()), "receipt_schema_version_invalid"), ("catalog_id", Some("wrong-catalog".to_owned()), "receipt_catalog_id_mismatch"), ("catalog_revision_sha256", Some("0".repeat(64)), "receipt_catalog_revision_sha256_mismatch")];
+    for (field, replacement, code) in cases {
+        let root = retained_graph();
+        let path = receipt(&root, "success");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if let Some(replacement) = replacement {
+            receipt[field] = replacement.into();
+        } else {
+            receipt.as_object_mut().unwrap().remove(field);
+        }
+        fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(validate(&root).unwrap_err().codes(), [code]);
+    }
+
+    let root = retained_graph();
+    let path = root.0.join("fixtures/corpus-manifest.json");
+    let mut catalog: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    catalog["fixtures"][0]["baseline"]["semantic_sha256"] = "0".repeat(64).into();
+    fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    #[rustfmt::skip]
+    assert_eq!(validate(&root).unwrap_err().codes(), ["baseline_semantic_sha256_mismatch"]);
 }
 
 #[test]
@@ -605,6 +723,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     let root = TempRoot::new();
     let digest = write_graph(&root.0, "fixture");
     let document = catalog_document(&[baseline_entry("fixture", &digest)]);
+    bind_catalog_receipts(&root.0, &document);
     let catalog = catalog::validate_catalog_bytes(document.as_bytes(), &root.0).unwrap();
     assert!(catalog.baseline("fixture").is_some());
     assert!(catalog.baseline("unknown").is_none());
@@ -626,6 +745,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
             codes
         );
         write_graph(&root.0, "fixture");
+        bind_catalog_receipts(&root.0, &document);
     }
     let outside = TempRoot::new();
     fs::write(outside.0.join("outside.json"), b"{}").unwrap();
@@ -640,6 +760,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     );
     fs::remove_file(root.0.join("baseline.json")).unwrap();
     write_graph(&root.0, "fixture");
+    bind_catalog_receipts(&root.0, &document);
     for (path, bytes, code) in [
         (
             "baseline.json",
@@ -660,6 +781,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
             [code]
         );
         write_graph(&root.0, "fixture");
+        bind_catalog_receipts(&root.0, &document);
     }
     fs::remove_file(root.0.join("baseline.json")).unwrap();
     fs::create_dir(root.0.join("baseline.json")).unwrap();
@@ -671,12 +793,13 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     );
     fs::remove_dir(root.0.join("baseline.json")).unwrap();
     write_graph(&root.0, "fixture");
-    let bad = format!(
-        r#"{{"manifest_sha256":"{}","semantic_sha256":"{}","outcomes":[{{"id":"fixture","outcome":"failure","expected_diagnostic_code":"input_outside_allowed_root"}}]}}"#,
-        "0".repeat(64),
-        "a".repeat(64)
-    );
-    fs::write(root.0.join("receipt.json"), bad).unwrap();
+    bind_catalog_receipts(&root.0, &document);
+    let receipt = root.0.join("receipt.json");
+    let mut bad: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    bad["manifest_sha256"] = "0".repeat(64).into();
+    bad["outcomes"][0]["outcome"] = "failure".into();
+    bad["outcomes"][0]["expected_diagnostic_code"] = "input_outside_allowed_root".into();
+    fs::write(&receipt, serde_json::to_vec(&bad).unwrap()).unwrap();
     assert_eq!(
         catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
             .unwrap_err()
@@ -688,7 +811,11 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
         ]
     );
     write_graph(&root.0, "fixture");
-    fs::write(root.0.join("receipt.json"), r#"{"manifest_sha256":"bad","semantic_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","outcomes":[{"id":"fixture","outcome":"success","expected_diagnostic_code":null}]}"#).unwrap();
+    bind_catalog_receipts(&root.0, &document);
+    let receipt = root.0.join("receipt.json");
+    let mut bad: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    bad["manifest_sha256"] = "bad".into();
+    fs::write(&receipt, serde_json::to_vec(&bad).unwrap()).unwrap();
     assert_eq!(
         catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
             .unwrap_err()
@@ -700,6 +827,8 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     let first_document =
         catalog_document(&[baseline_entry("fixture", &write_graph(&first.0, "fixture"))]);
     write_graph(&second.0, "fixture");
+    bind_catalog_receipts(&first.0, &first_document);
+    bind_catalog_receipts(&second.0, &first_document);
     let left = catalog::validate_catalog_bytes(first_document.as_bytes(), &first.0).unwrap();
     let right = catalog::validate_catalog_bytes(first_document.as_bytes(), &second.0).unwrap();
     assert_eq!(left.revision_sha256, right.revision_sha256);
@@ -744,6 +873,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
         "fixture",
         &write_graph(&semantic.0, "fixture"),
     )]);
+    bind_catalog_receipts(&semantic.0, &document);
     let receipt = semantic.0.join("receipt.json");
     fs::write(
         &receipt,
@@ -763,6 +893,7 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
         "fixture",
         &write_graph(&combined.0, "fixture"),
     )]);
+    bind_catalog_receipts(&combined.0, &document);
     let receipt = combined.0.join("receipt.json");
     fs::write(
         &receipt,
@@ -825,8 +956,10 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
             "a".repeat(64)
         ),
     );
+    let nested_document = catalog_document(&[nested_entry]);
+    bind_catalog_receipts(&nested.0, &nested_document);
     assert_eq!(
-        catalog::validate_catalog_bytes(catalog_document(&[nested_entry]).as_bytes(), &nested.0)
+        catalog::validate_catalog_bytes(nested_document.as_bytes(), &nested.0)
             .unwrap_err()
             .codes(),
         ["baseline_manifest_fixture_mismatch"]
@@ -870,6 +1003,7 @@ fn execution_revision_excludes_only_validated_baseline_semantic_links() {
     let root = TempRoot::new();
     let digest = write_graph(&root.0, "fixture");
     let first_document = catalog_document(&[baseline_entry("fixture", &digest)]);
+    bind_catalog_receipts(&root.0, &first_document);
     let first = catalog::validate_catalog_bytes(first_document.as_bytes(), &root.0).unwrap();
 
     let changed_link = first_document.replace(&"a".repeat(64), &"b".repeat(64));
@@ -892,6 +1026,7 @@ fn execution_revision_excludes_only_validated_baseline_semantic_links() {
     let second_document = catalog_document(&[
         baseline_entry("fixture", &second_digest).replace(&"a".repeat(64), &"b".repeat(64))
     ]);
+    bind_catalog_receipts(&second_root.0, &second_document);
     let second =
         catalog::validate_catalog_bytes(second_document.as_bytes(), &second_root.0).unwrap();
     assert_ne!(first.revision_sha256, second.revision_sha256);
@@ -919,6 +1054,7 @@ fn execution_revision_excludes_only_validated_baseline_semantic_links() {
             )
             .unwrap();
         }
+        bind_catalog_receipts(&root.0, &changed);
         assert_ne!(
             first.execution_revision_sha256,
             catalog::validate_catalog_bytes(changed.as_bytes(), &root.0)
@@ -947,6 +1083,7 @@ fn execution_revision_excludes_only_validated_baseline_semantic_links() {
     fs::write(root.0.join("fixtures/input.txt"), b"changed input").unwrap();
     let changed_content =
         first_document.replace(&digest, &format!("{:x}", Sha256::digest(b"changed input")));
+    bind_catalog_receipts(&root.0, &changed_content);
     assert_ne!(
         first.execution_revision_sha256,
         catalog::validate_catalog_bytes(changed_content.as_bytes(), &root.0)
