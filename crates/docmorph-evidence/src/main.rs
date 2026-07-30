@@ -48,6 +48,8 @@ enum ExpectedOutcome {
 #[derive(Serialize)]
 struct Receipt {
     schema_version: &'static str,
+    catalog_id: String,
+    catalog_revision_sha256: String,
     command: Vec<String>,
     manifest_sha256: String,
     contract_version: ContractVersion,
@@ -63,6 +65,8 @@ struct Receipt {
 
 #[derive(Serialize)]
 struct SemanticReceipt<'a> {
+    catalog_id: &'a str,
+    catalog_revision_sha256: &'a str,
     manifest_sha256: &'a str,
     contract_version: ContractVersion,
     toolchain: &'a Toolchain,
@@ -146,7 +150,7 @@ fn run() -> Result<(), String> {
     if !arguments.repository_root.is_dir() {
         return Err("catalog_invalid:repository_root_invalid".to_owned());
     }
-    catalog::validate_catalog_bytes(&catalog_bytes, &arguments.repository_root)
+    let catalog = catalog::validate_catalog_bytes(&catalog_bytes, &arguments.repository_root)
         .map_err(|errors| format!("catalog_invalid:{}", errors.codes()[0]))?;
     let started = Instant::now();
     let manifest_bytes = fs::read(&arguments.manifest)
@@ -188,6 +192,8 @@ fn run() -> Result<(), String> {
     };
     let manifest_sha256 = sha256(&manifest_bytes);
     let semantic = SemanticReceipt {
+        catalog_id: &catalog.catalog_id,
+        catalog_revision_sha256: &catalog.execution_revision_sha256,
         manifest_sha256: &manifest_sha256,
         contract_version: manifest.contract_version,
         toolchain: &toolchain,
@@ -202,7 +208,9 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("receipt cannot serialize: {error}"))?,
     );
     let receipt = Receipt {
-        schema_version: "1.1",
+        schema_version: "1.2",
+        catalog_id: catalog.catalog_id,
+        catalog_revision_sha256: catalog.execution_revision_sha256,
         command,
         manifest_sha256,
         contract_version: manifest.contract_version,

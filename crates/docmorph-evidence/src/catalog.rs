@@ -156,31 +156,38 @@ pub fn validate_catalog_bytes(
     if !findings.is_empty() {
         return Err(errors(findings));
     }
-    let baselines = fixtures
-        .iter()
-        .filter_map(|fixture| {
-            fixture.baseline.as_ref().and_then(|_| {
-                baseline(fixture, &root, &mut findings)
-                    .map(|link| (fixture.id.clone(), ValidatedBaseline { _link: link }))
-            })
-        })
-        .collect();
-    if !findings.is_empty() {
-        return Err(errors(findings));
-    }
     for fixture in &mut fixtures {
         fixture.characteristics.sort();
     }
     let canonical_catalog = CorpusCatalog {
         schema_version: catalog.schema_version,
         catalog_id: catalog.catalog_id.clone(),
-        fixtures,
+        fixtures: fixtures.clone(),
     };
+    let execution_revision_sha256 = execution_revision(&canonical_catalog);
+    let baselines = fixtures
+        .iter()
+        .filter_map(|fixture| {
+            fixture.baseline.as_ref().and_then(|_| {
+                baseline(
+                    fixture,
+                    &root,
+                    &catalog.catalog_id,
+                    &execution_revision_sha256,
+                    &mut findings,
+                )
+                .map(|link| (fixture.id.clone(), ValidatedBaseline { _link: link }))
+            })
+        })
+        .collect();
+    if !findings.is_empty() {
+        return Err(errors(findings));
+    }
     let canonical = serde_json::to_vec(&canonical_catalog).expect("catalog schema serializes");
     Ok(ValidatedCatalog {
         catalog_id: catalog.catalog_id,
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
-        execution_revision_sha256: execution_revision(&canonical_catalog),
+        execution_revision_sha256,
         baselines,
     })
 }
@@ -199,9 +206,22 @@ fn execution_revision(catalog: &CorpusCatalog) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+pub(crate) fn execution_revision_for_catalog_bytes(bytes: &[u8]) -> String {
+    let mut catalog: CorpusCatalog = serde_json::from_slice(bytes).expect("catalog schema parses");
+    catalog
+        .fixtures
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    for fixture in &mut catalog.fixtures {
+        fixture.characteristics.sort();
+    }
+    execution_revision(&catalog)
+}
+
 fn baseline(
     fixture: &CorpusFixture,
     root: &Path,
+    catalog_id: &str,
+    catalog_revision_sha256: &str,
     findings: &mut Vec<CatalogError>,
 ) -> Option<BaselineLink> {
     let link_data = fixture.baseline.as_ref()?;
@@ -246,6 +266,46 @@ fn baseline(
     });
     let (manifest_bytes, manifest) = manifest?;
     let receipt = receipt?;
+    if receipt
+        .get("schema_version")
+        .and_then(|value| value.as_str())
+        != Some("1.2")
+    {
+        findings.push(error(
+            "receipt_schema_version_invalid",
+            &fixture.id,
+            "retained_receipt",
+        ));
+    }
+    match receipt.get("catalog_id").and_then(|value| value.as_str()) {
+        None => findings.push(error(
+            "receipt_catalog_id_missing",
+            &fixture.id,
+            "retained_receipt",
+        )),
+        Some(value) if value != catalog_id => findings.push(error(
+            "receipt_catalog_id_mismatch",
+            &fixture.id,
+            "retained_receipt",
+        )),
+        Some(_) => {}
+    }
+    match receipt
+        .get("catalog_revision_sha256")
+        .and_then(|value| value.as_str())
+    {
+        None => findings.push(error(
+            "receipt_catalog_revision_sha256_missing",
+            &fixture.id,
+            "retained_receipt",
+        )),
+        Some(value) if value != catalog_revision_sha256 => findings.push(error(
+            "receipt_catalog_revision_sha256_mismatch",
+            &fixture.id,
+            "retained_receipt",
+        )),
+        Some(_) => {}
+    }
     let hash = receipt
         .get("manifest_sha256")
         .and_then(|value| value.as_str());
