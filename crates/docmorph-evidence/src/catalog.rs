@@ -99,6 +99,11 @@ pub struct ValidatedCatalog {
 pub(crate) struct ValidatedBaseline {
     _link: BaselineLink,
 }
+impl ValidatedBaseline {
+    pub(crate) fn semantic_sha256(&self) -> &str {
+        &self._link.semantic_sha256
+    }
+}
 impl ValidatedCatalog {
     pub(crate) fn baseline(&self, id: &str) -> Option<&ValidatedBaseline> {
         self.baselines.get(id)

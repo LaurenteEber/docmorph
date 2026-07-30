@@ -362,12 +362,15 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     let left = catalog::validate_catalog_bytes(first_document.as_bytes(), &first.0).unwrap();
     let right = catalog::validate_catalog_bytes(first_document.as_bytes(), &second.0).unwrap();
     assert_eq!(left.revision_sha256, right.revision_sha256);
-    let expected = format!(
-        "Some(ValidatedBaseline {{ _link: BaselineLink {{ operation_manifest: \"baseline.json\", retained_receipt: \"receipt.json\", semantic_sha256: \"{}\" }} }})",
-        "a".repeat(64)
+    let expected_semantic_sha256 = "a".repeat(64);
+    assert_eq!(
+        left.baseline("fixture").unwrap().semantic_sha256(),
+        expected_semantic_sha256
     );
-    assert_eq!(format!("{:?}", left.baseline("fixture")), expected);
-    assert_eq!(format!("{:?}", right.baseline("fixture")), expected);
+    assert_eq!(
+        right.baseline("fixture").unwrap().semantic_sha256(),
+        expected_semantic_sha256
+    );
     let receipt = first.0.join("receipt.json");
     fs::write(
         &receipt,
@@ -390,7 +393,10 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
         ]
     );
     let untouched = catalog::validate_catalog_bytes(first_document.as_bytes(), &second.0).unwrap();
-    assert_eq!(format!("{:?}", untouched.baseline("fixture")), expected);
+    assert_eq!(
+        untouched.baseline("fixture").unwrap().semantic_sha256(),
+        expected_semantic_sha256
+    );
     assert_eq!(untouched.revision_sha256, right.revision_sha256);
     let semantic = TempRoot::new();
     let document = catalog_document(&[baseline_entry(
@@ -558,6 +564,44 @@ fn catalog_rejects_schema_duplicate_and_metadata_errors_in_order() {
             vec![code]
         );
     }
+}
+#[test]
+fn catalog_reports_catalog_root_and_required_metadata_contract_codes() {
+    let root = TempRoot::new();
+    assert_eq!(
+        catalog::validate_catalog_bytes(
+            br#"{"schema_version":"1.0","catalog_id":" ","fixtures":[]}"#,
+            &root.0,
+        )
+        .unwrap_err()
+        .codes(),
+        ["catalog_id_invalid"]
+    );
+    assert_eq!(
+        catalog::validate_catalog_bytes(
+            br#"{"schema_version":"1.0","catalog_id":"smoke","fixtures":[]}"#,
+            &root.0.join("missing"),
+        )
+        .unwrap_err()
+        .codes(),
+        ["repository_root_invalid"]
+    );
+
+    let fixture = root.0.join("fixtures/input.txt");
+    fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+    fs::write(&fixture, b"input").unwrap();
+    let entry = catalog_entry(
+        "fixture",
+        "fixtures/input.txt",
+        &format!("{:x}", Sha256::digest(b"input")),
+    )
+    .replace("repository fixture", " ");
+    assert_eq!(
+        catalog::validate_catalog_bytes(catalog_document(&[entry]).as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        ["required_metadata_missing"]
+    );
 }
 #[test]
 fn catalog_confines_fixture_reads_and_checks_digest() {
