@@ -93,6 +93,7 @@ struct LicenseEvidence {
 pub struct ValidatedCatalog {
     pub catalog_id: String,
     pub revision_sha256: String,
+    pub execution_revision_sha256: String,
     baselines: BTreeMap<String, ValidatedBaseline>,
 }
 #[derive(Clone, Debug)]
@@ -170,17 +171,32 @@ pub fn validate_catalog_bytes(
     for fixture in &mut fixtures {
         fixture.characteristics.sort();
     }
-    let canonical = serde_json::to_vec(&CorpusCatalog {
+    let canonical_catalog = CorpusCatalog {
         schema_version: catalog.schema_version,
         catalog_id: catalog.catalog_id.clone(),
         fixtures,
-    })
-    .expect("catalog schema serializes");
+    };
+    let canonical = serde_json::to_vec(&canonical_catalog).expect("catalog schema serializes");
     Ok(ValidatedCatalog {
         catalog_id: catalog.catalog_id,
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
+        execution_revision_sha256: execution_revision(&canonical_catalog),
         baselines,
     })
+}
+
+fn execution_revision(catalog: &CorpusCatalog) -> String {
+    let mut projection = serde_json::to_value(catalog).expect("catalog schema serializes");
+    for fixture in projection["fixtures"]
+        .as_array_mut()
+        .expect("catalog fixtures serialize")
+    {
+        if let Some(baseline) = fixture["baseline"].as_object_mut() {
+            baseline.remove("semantic_sha256");
+        }
+    }
+    let bytes = serde_json::to_vec(&projection).expect("execution projection serializes");
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn baseline(

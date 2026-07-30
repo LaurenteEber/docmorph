@@ -525,6 +525,95 @@ fn catalog_without_baseline_claims_is_canonical_and_relocatable() {
     assert_eq!(first.revision_sha256, second.revision_sha256);
 }
 #[test]
+fn execution_revision_excludes_only_validated_baseline_semantic_links() {
+    let root = TempRoot::new();
+    let digest = write_graph(&root.0, "fixture");
+    let first_document = catalog_document(&[baseline_entry("fixture", &digest)]);
+    let first = catalog::validate_catalog_bytes(first_document.as_bytes(), &root.0).unwrap();
+
+    let changed_link = first_document.replace(&"a".repeat(64), &"b".repeat(64));
+    assert_eq!(
+        catalog::validate_catalog_bytes(changed_link.as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_semantic_sha256_mismatch"]
+    );
+
+    let second_root = TempRoot::new();
+    let second_digest = write_graph(&second_root.0, "fixture");
+    fs::write(
+        second_root.0.join("receipt.json"),
+        fs::read_to_string(second_root.0.join("receipt.json"))
+            .unwrap()
+            .replace(&"a".repeat(64), &"b".repeat(64)),
+    )
+    .unwrap();
+    let second_document = catalog_document(&[
+        baseline_entry("fixture", &second_digest).replace(&"a".repeat(64), &"b".repeat(64))
+    ]);
+    let second =
+        catalog::validate_catalog_bytes(second_document.as_bytes(), &second_root.0).unwrap();
+    assert_ne!(first.revision_sha256, second.revision_sha256);
+    assert_eq!(
+        first.execution_revision_sha256,
+        second.execution_revision_sha256
+    );
+
+    for changed in [
+        first_document.replace("\"catalog_id\":\"smoke\"", "\"catalog_id\":\"other\""),
+        first_document.replace(
+            "\"comparison_intent\":\"byte_exact\"",
+            "\"comparison_intent\":\"diagnostic_exact\"",
+        ),
+        first_document.replace("baseline.json", "alternate.json"),
+        first_document.replace("receipt.json", "alternate-receipt.json"),
+    ] {
+        if changed.contains("alternate.json") {
+            fs::copy(root.0.join("baseline.json"), root.0.join("alternate.json")).unwrap();
+        }
+        if changed.contains("alternate-receipt.json") {
+            fs::copy(
+                root.0.join("receipt.json"),
+                root.0.join("alternate-receipt.json"),
+            )
+            .unwrap();
+        }
+        assert_ne!(
+            first.execution_revision_sha256,
+            catalog::validate_catalog_bytes(changed.as_bytes(), &root.0)
+                .unwrap()
+                .execution_revision_sha256
+        );
+    }
+
+    let unordered = catalog_document(&[
+        catalog_entry("b", "fixtures/input.txt", &digest),
+        catalog_entry("a", "fixtures/input.txt", &digest),
+    ]);
+    let reordered = unordered.replace(
+        "[\"synthetic\",\"smoke_only\"]",
+        "[\"smoke_only\",\"synthetic\"]",
+    );
+    assert_eq!(
+        catalog::validate_catalog_bytes(unordered.as_bytes(), &root.0)
+            .unwrap()
+            .execution_revision_sha256,
+        catalog::validate_catalog_bytes(reordered.as_bytes(), &root.0)
+            .unwrap()
+            .execution_revision_sha256
+    );
+
+    fs::write(root.0.join("fixtures/input.txt"), b"changed input").unwrap();
+    let changed_content =
+        first_document.replace(&digest, &format!("{:x}", Sha256::digest(b"changed input")));
+    assert_ne!(
+        first.execution_revision_sha256,
+        catalog::validate_catalog_bytes(changed_content.as_bytes(), &root.0)
+            .unwrap()
+            .execution_revision_sha256
+    );
+}
+#[test]
 fn catalog_rejects_schema_duplicate_and_metadata_errors_in_order() {
     let root = TempRoot::new();
     let entry = catalog_entry("duplicate", "../escape", "bad")
