@@ -11,7 +11,8 @@
       "provenance": { "assertion": "project_authored_synthetic", "source": "DocMorph repository fixture" },
       "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
       "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
-      "comparison_intent": "diagnostic_exact", "determinism_intent": "semantic_receipt_same_environment"
+      "comparison_intent": "diagnostic_exact", "determinism_intent": "semantic_receipt_same_environment",
+      "baseline": { "operation_manifest": "fixtures/evidence-policy-failure-manifest.json", "retained_receipt": "evidence/policy-failure/receipt.json", "semantic_sha256": "2508c0ea84e89c12ca69266714d3d2bde74a511e56fcc83961d7ed22070f685e" }
     },
     {
       "id": "success",
@@ -22,7 +23,8 @@
       "provenance": { "assertion": "project_authored_synthetic", "source": "DocMorph repository fixture" },
       "license": { "assertion": "workspace_license", "expression": "Apache-2.0 OR MIT" },
       "sensitivity": "synthetic_non_sensitive", "distribution": "repository_allowed",
-      "comparison_intent": "byte_exact", "determinism_intent": "semantic_receipt_same_environment"
+      "comparison_intent": "byte_exact", "determinism_intent": "semantic_receipt_same_environment",
+      "baseline": { "operation_manifest": "fixtures/evidence-success-manifest.json", "retained_receipt": "evidence/success/receipt.json", "semantic_sha256": "368523caee8f3c50fcfd8bd7172b0f4daa74b2645cc7ad6cf2104e876cc06f6e" }
     }
   ]
 }

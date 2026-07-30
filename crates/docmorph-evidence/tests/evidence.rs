@@ -242,6 +242,258 @@ fn catalog_document(entries: &[String]) -> String {
         entries.join(",")
     )
 }
+fn baseline_entry(id: &str, digest: &str) -> String {
+    catalog_entry(id, "fixtures/input.txt", digest).replace(
+        "\"determinism_intent\":\"semantic_receipt_same_environment\"",
+        &format!("\"determinism_intent\":\"semantic_receipt_same_environment\",\"baseline\":{{\"operation_manifest\":\"baseline.json\",\"retained_receipt\":\"receipt.json\",\"semantic_sha256\":\"{}\"}}", "a".repeat(64)),
+    )
+}
+
+fn write_graph(root: &std::path::Path, id: &str) -> String {
+    let input = root.join("fixtures/input.txt");
+    fs::create_dir_all(input.parent().unwrap()).unwrap();
+    fs::write(&input, b"input").unwrap();
+    let manifest = format!(r#"{{"fixtures":[{{"id":"{id}","input":"fixtures/input.txt"}}]}}"#);
+    fs::write(root.join("baseline.json"), &manifest).unwrap();
+    fs::write(root.join("receipt.json"), format!(r#"{{"manifest_sha256":"{:x}","semantic_sha256":"{}","outcomes":[{{"id":"{id}","outcome":"success","expected_diagnostic_code":null}}]}}"#, Sha256::digest(manifest), "a".repeat(64))).unwrap();
+    format!("{:x}", Sha256::digest(b"input"))
+}
+
+#[test]
+fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
+    let root = TempRoot::new();
+    let digest = write_graph(&root.0, "fixture");
+    let document = catalog_document(&[baseline_entry("fixture", &digest)]);
+    let catalog = catalog::validate_catalog_bytes(document.as_bytes(), &root.0).unwrap();
+    assert!(catalog.baseline("fixture").is_some());
+    assert!(catalog.baseline("unknown").is_none());
+    for (paths, codes) in [
+        (&["baseline.json"][..], &["baseline_manifest_missing"][..]),
+        (&["receipt.json"][..], &["baseline_receipt_missing"][..]),
+        (
+            &["baseline.json", "receipt.json"][..],
+            &["baseline_manifest_missing", "baseline_receipt_missing"][..],
+        ),
+    ] {
+        for path in paths {
+            fs::remove_file(root.0.join(path)).unwrap();
+        }
+        assert_eq!(
+            catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+                .unwrap_err()
+                .codes(),
+            codes
+        );
+        write_graph(&root.0, "fixture");
+    }
+    let outside = TempRoot::new();
+    fs::write(outside.0.join("outside.json"), b"{}").unwrap();
+    fs::remove_file(root.0.join("baseline.json")).unwrap();
+    std::os::unix::fs::symlink(outside.0.join("outside.json"), root.0.join("baseline.json"))
+        .unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_link_escapes_repository"]
+    );
+    fs::remove_file(root.0.join("baseline.json")).unwrap();
+    write_graph(&root.0, "fixture");
+    for (path, bytes, code) in [
+        (
+            "baseline.json",
+            b"{".as_slice(),
+            "baseline_manifest_json_invalid",
+        ),
+        (
+            "receipt.json",
+            b"{".as_slice(),
+            "baseline_receipt_json_invalid",
+        ),
+    ] {
+        fs::write(root.0.join(path), bytes).unwrap();
+        assert_eq!(
+            catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+                .unwrap_err()
+                .codes(),
+            [code]
+        );
+        write_graph(&root.0, "fixture");
+    }
+    fs::remove_file(root.0.join("baseline.json")).unwrap();
+    fs::create_dir(root.0.join("baseline.json")).unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_link_not_regular_file"]
+    );
+    fs::remove_dir(root.0.join("baseline.json")).unwrap();
+    write_graph(&root.0, "fixture");
+    let bad = format!(
+        r#"{{"manifest_sha256":"{}","semantic_sha256":"{}","outcomes":[{{"id":"fixture","outcome":"failure","expected_diagnostic_code":"input_outside_allowed_root"}}]}}"#,
+        "0".repeat(64),
+        "a".repeat(64)
+    );
+    fs::write(root.0.join("receipt.json"), bad).unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        [
+            "baseline_receipt_diagnostic_mismatch",
+            "baseline_receipt_outcome_mismatch",
+            "receipt_manifest_sha256_mismatch"
+        ]
+    );
+    write_graph(&root.0, "fixture");
+    fs::write(root.0.join("receipt.json"), r#"{"manifest_sha256":"bad","semantic_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","outcomes":[{"id":"fixture","outcome":"success","expected_diagnostic_code":null}]}"#).unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &root.0)
+            .unwrap_err()
+            .codes(),
+        ["receipt_manifest_sha256_invalid"]
+    );
+    let first = TempRoot::new();
+    let second = TempRoot::new();
+    let first_document =
+        catalog_document(&[baseline_entry("fixture", &write_graph(&first.0, "fixture"))]);
+    write_graph(&second.0, "fixture");
+    let left = catalog::validate_catalog_bytes(first_document.as_bytes(), &first.0).unwrap();
+    let right = catalog::validate_catalog_bytes(first_document.as_bytes(), &second.0).unwrap();
+    assert_eq!(left.revision_sha256, right.revision_sha256);
+    let expected = format!(
+        "Some(ValidatedBaseline {{ _link: BaselineLink {{ operation_manifest: \"baseline.json\", retained_receipt: \"receipt.json\", semantic_sha256: \"{}\" }} }})",
+        "a".repeat(64)
+    );
+    assert_eq!(format!("{:?}", left.baseline("fixture")), expected);
+    assert_eq!(format!("{:?}", right.baseline("fixture")), expected);
+    let receipt = first.0.join("receipt.json");
+    fs::write(
+        &receipt,
+        fs::read_to_string(&receipt)
+            .unwrap()
+            .replace("\"outcome\":\"success\"", "\"outcome\":\"failure\"")
+            .replace(
+                "\"expected_diagnostic_code\":null",
+                "\"expected_diagnostic_code\":\"input_outside_allowed_root\"",
+            ),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(first_document.as_bytes(), &first.0)
+            .unwrap_err()
+            .codes(),
+        [
+            "baseline_receipt_diagnostic_mismatch",
+            "baseline_receipt_outcome_mismatch"
+        ]
+    );
+    let untouched = catalog::validate_catalog_bytes(first_document.as_bytes(), &second.0).unwrap();
+    assert_eq!(format!("{:?}", untouched.baseline("fixture")), expected);
+    assert_eq!(untouched.revision_sha256, right.revision_sha256);
+    let semantic = TempRoot::new();
+    let document = catalog_document(&[baseline_entry(
+        "fixture",
+        &write_graph(&semantic.0, "fixture"),
+    )]);
+    let receipt = semantic.0.join("receipt.json");
+    fs::write(
+        &receipt,
+        fs::read_to_string(&receipt)
+            .unwrap()
+            .replace(&"a".repeat(64), &"b".repeat(64)),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &semantic.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_semantic_sha256_mismatch"]
+    );
+    let combined = TempRoot::new();
+    let document = catalog_document(&[baseline_entry(
+        "fixture",
+        &write_graph(&combined.0, "fixture"),
+    )]);
+    let receipt = combined.0.join("receipt.json");
+    fs::write(
+        &receipt,
+        fs::read_to_string(&receipt)
+            .unwrap()
+            .replace(&"a".repeat(64), &"b".repeat(64))
+            .replace("\"outcome\":\"success\"", "\"outcome\":\"failure\"")
+            .replace(
+                "\"expected_diagnostic_code\":null",
+                "\"expected_diagnostic_code\":\"input_outside_allowed_root\"",
+            ),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &combined.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_semantic_sha256_mismatch"]
+    );
+    let manifest = combined.0.join("baseline.json");
+    fs::write(
+        &manifest,
+        format!("{} ", fs::read_to_string(&manifest).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog::validate_catalog_bytes(document.as_bytes(), &combined.0)
+            .unwrap_err()
+            .codes(),
+        [
+            "baseline_semantic_sha256_mismatch",
+            "receipt_manifest_sha256_mismatch"
+        ]
+    );
+    let nested = TempRoot::new();
+    let nested_input = nested.0.join("fixtures/input.txt");
+    fs::create_dir_all(nested_input.parent().unwrap()).unwrap();
+    fs::write(&nested_input, b"input").unwrap();
+    fs::create_dir_all(nested.0.join("sub")).unwrap();
+    let unrelated = r#"{"fixtures":[]}"#;
+    fs::write(nested.0.join("sub/baseline.json"), unrelated).unwrap();
+    fs::write(
+        nested.0.join("sub/receipt.json"),
+        format!(
+            r#"{{"manifest_sha256":"{:x}","semantic_sha256":"{}","outcomes":[{{"id":"fixture","outcome":"success","expected_diagnostic_code":null}}]}}"#,
+            Sha256::digest(unrelated),
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    let nested_entry = catalog_entry(
+        "fixture",
+        "fixtures/input.txt",
+        &format!("{:x}", Sha256::digest(b"input")),
+    )
+    .replace(
+        "\"determinism_intent\":\"semantic_receipt_same_environment\"",
+        &format!(
+            "\"determinism_intent\":\"semantic_receipt_same_environment\",\"baseline\":{{\"operation_manifest\":\"sub/baseline.json\",\"retained_receipt\":\"sub/receipt.json\",\"semantic_sha256\":\"{}\"}}",
+            "a".repeat(64)
+        ),
+    );
+    assert_eq!(
+        catalog::validate_catalog_bytes(catalog_document(&[nested_entry]).as_bytes(), &nested.0)
+            .unwrap_err()
+            .codes(),
+        ["baseline_manifest_fixture_mismatch"]
+    );
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let retained = catalog::validate_catalog_bytes(
+        include_bytes!("../../../fixtures/corpus-manifest.json"),
+        &repository,
+    )
+    .unwrap();
+    assert!(
+        retained.baseline("success").is_some() && retained.baseline("policy-failure").is_some()
+    );
+}
 #[test]
 fn catalog_without_baseline_claims_is_canonical_and_relocatable() {
     let root = TempRoot::new();

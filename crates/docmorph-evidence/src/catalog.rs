@@ -1,7 +1,10 @@
 use docmorph_core::{InputPolicy, io::validate_input};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path},
+};
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CorpusCatalog {
@@ -24,6 +27,14 @@ struct CorpusFixture {
     distribution: Distribution,
     comparison_intent: ComparisonIntent,
     determinism_intent: DeterminismIntent,
+    baseline: Option<BaselineLink>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BaselineLink {
+    operation_manifest: String,
+    retained_receipt: String,
+    semantic_sha256: String,
 }
 macro_rules! enum_schema {
     ($name:ident { $($value:ident),+ $(,)? }) => {
@@ -82,6 +93,16 @@ struct LicenseEvidence {
 pub struct ValidatedCatalog {
     pub catalog_id: String,
     pub revision_sha256: String,
+    baselines: BTreeMap<String, ValidatedBaseline>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedBaseline {
+    _link: BaselineLink,
+}
+impl ValidatedCatalog {
+    pub(crate) fn baseline(&self, id: &str) -> Option<&ValidatedBaseline> {
+        self.baselines.get(id)
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CatalogError {
@@ -129,6 +150,18 @@ pub fn validate_catalog_bytes(
     if !findings.is_empty() {
         return Err(errors(findings));
     }
+    let baselines = fixtures
+        .iter()
+        .filter_map(|fixture| {
+            fixture.baseline.as_ref().and_then(|_| {
+                baseline(fixture, &root, &mut findings)
+                    .map(|link| (fixture.id.clone(), ValidatedBaseline { _link: link }))
+            })
+        })
+        .collect();
+    if !findings.is_empty() {
+        return Err(errors(findings));
+    }
     for fixture in &mut fixtures {
         fixture.characteristics.sort();
     }
@@ -141,7 +174,169 @@ pub fn validate_catalog_bytes(
     Ok(ValidatedCatalog {
         catalog_id: catalog.catalog_id,
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
+        baselines,
     })
+}
+
+fn baseline(
+    fixture: &CorpusFixture,
+    root: &Path,
+    findings: &mut Vec<CatalogError>,
+) -> Option<BaselineLink> {
+    let link_data = fixture.baseline.as_ref()?;
+    let manifest = link(
+        root,
+        &link_data.operation_manifest,
+        fixture,
+        "operation_manifest",
+        "baseline_manifest_missing",
+        findings,
+    );
+    let receipt = link(
+        root,
+        &link_data.retained_receipt,
+        fixture,
+        "retained_receipt",
+        "baseline_receipt_missing",
+        findings,
+    );
+    let manifest = manifest.and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map(|json| (bytes, json))
+            .map_err(|_| {
+                findings.push(error(
+                    "baseline_manifest_json_invalid",
+                    &fixture.id,
+                    "operation_manifest",
+                ))
+            })
+            .ok()
+    });
+    let receipt = receipt.and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| {
+                findings.push(error(
+                    "baseline_receipt_json_invalid",
+                    &fixture.id,
+                    "retained_receipt",
+                ))
+            })
+            .ok()
+    });
+    let (manifest_bytes, manifest) = manifest?;
+    let receipt = receipt?;
+    let hash = receipt
+        .get("manifest_sha256")
+        .and_then(|value| value.as_str());
+    match hash {
+        Some(hash) if sha256(hash) => {
+            if hash != format!("{:x}", Sha256::digest(manifest_bytes)) {
+                findings.push(error(
+                    "receipt_manifest_sha256_mismatch",
+                    &fixture.id,
+                    "retained_receipt",
+                ));
+            }
+        }
+        _ => findings.push(error(
+            "receipt_manifest_sha256_invalid",
+            &fixture.id,
+            "retained_receipt",
+        )),
+    }
+    let semantic_bound = receipt
+        .get("semantic_sha256")
+        .and_then(|value| value.as_str())
+        == Some(&link_data.semantic_sha256);
+    if !semantic_bound {
+        findings.push(error(
+            "baseline_semantic_sha256_mismatch",
+            &fixture.id,
+            "retained_receipt",
+        ));
+    }
+    let input = manifest
+        .get("fixtures")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.iter().find(|item| item["id"] == fixture.id))
+        .and_then(|item| item["input"].as_str());
+    let parent = Path::new(&link_data.operation_manifest)
+        .parent()
+        .unwrap_or(Path::new(""));
+    let expected_input = Path::new(&fixture.path)
+        .strip_prefix(parent)
+        .ok()
+        .and_then(|path| path.to_str());
+    if input.is_none() || input != expected_input {
+        findings.push(error(
+            "baseline_manifest_fixture_mismatch",
+            &fixture.id,
+            "operation_manifest",
+        ));
+    }
+    if semantic_bound {
+        let outcome = receipt
+            .get("outcomes")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == fixture.id));
+        let expected = if matches!(fixture.category, FixtureCategory::HarnessSuccessSmoke) {
+            "success"
+        } else {
+            "failure"
+        };
+        if outcome.and_then(|item| item["outcome"].as_str()) != Some(expected) {
+            findings.push(error(
+                "baseline_receipt_outcome_mismatch",
+                &fixture.id,
+                "retained_receipt",
+            ));
+        }
+        let diagnostic = if expected == "success" {
+            None
+        } else {
+            Some("input_outside_allowed_root")
+        };
+        if outcome.and_then(|item| item["expected_diagnostic_code"].as_str()) != diagnostic {
+            findings.push(error(
+                "baseline_receipt_diagnostic_mismatch",
+                &fixture.id,
+                "retained_receipt",
+            ));
+        }
+    }
+    Some(link_data.clone())
+}
+
+fn link(
+    root: &Path,
+    path: &str,
+    fixture: &CorpusFixture,
+    field: &'static str,
+    missing: &'static str,
+    findings: &mut Vec<CatalogError>,
+) -> Option<Vec<u8>> {
+    if !safe_relative(path) {
+        findings.push(error(
+            "baseline_link_not_repository_relative",
+            &fixture.id,
+            field,
+        ));
+        return None;
+    }
+    validate_input(&InputPolicy::new(vec![root.to_path_buf()]), root.join(path))
+        .map(|input| input.bytes().to_vec())
+        .map_err(|diagnostic| {
+            findings.push(error(
+                match diagnostic.code.as_str() {
+                    "input_outside_allowed_root" => "baseline_link_escapes_repository",
+                    "input_not_regular_file" => "baseline_link_not_regular_file",
+                    _ => missing,
+                },
+                &fixture.id,
+                field,
+            ))
+        })
+        .ok()
 }
 
 fn validate_fixture(fixture: &CorpusFixture, root: &Path, findings: &mut Vec<CatalogError>) {
