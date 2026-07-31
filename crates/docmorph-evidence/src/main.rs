@@ -2,6 +2,8 @@
 
 #[allow(dead_code)]
 mod catalog;
+#[allow(dead_code)]
+mod structural_catalog;
 
 use std::{
     env, fs,
