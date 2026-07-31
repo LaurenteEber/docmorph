@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 #[allow(dead_code)]
 #[path = "../src/catalog.rs"]
 mod catalog;
+#[path = "../src/structural_catalog.rs"]
+mod structural_catalog;
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -90,6 +92,60 @@ fn retained_mock_artifacts_remain_byte_and_semantically_pinned() {
             validated.baseline(id).unwrap().semantic_sha256(),
             semantic_hash,
             "{id}"
+        );
+    }
+}
+
+fn structural_catalog_document() -> String {
+    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
+}
+
+#[test]
+fn structural_envelope_core() {
+    let document = structural_catalog_document();
+    let first = structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).unwrap();
+    let second =
+        structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).unwrap();
+    assert_eq!(first.0, "structural-catalog");
+    assert_eq!(first.1, second.1);
+
+    let source = r#"{"id":"source","pages":[{"id":"page"}]}"#;
+    let case =
+        r#"{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}"#;
+    for (actual, expected) in [
+        (
+            document.replace("\"2.0\"", "\"1.0\""),
+            vec!["unsupported_schema_version"],
+        ),
+        (
+            document.replace("structural-catalog", "Catalog"),
+            vec!["catalog_id_invalid"],
+        ),
+        (
+            document.replace(source, &format!("{source},{source}")),
+            vec!["ambiguous_page_ref", "duplicate_source_id"],
+        ),
+        (
+            document.replace(
+                "[{\"id\":\"page\"}]",
+                "[{\"id\":\"page\"},{\"id\":\"page\"}]",
+            ),
+            vec!["ambiguous_page_ref", "duplicate_page_id"],
+        ),
+        (
+            document.replace(case, &format!("{case},{case}")),
+            vec!["duplicate_case_id", "duplicate_output_id"],
+        ),
+        (
+            document.replace("\"page_id\":\"page\"", "\"page_id\":\"missing\""),
+            vec!["dangling_page_ref"],
+        ),
+    ] {
+        assert_eq!(
+            structural_catalog::validate_structural_catalog_bytes(actual.as_bytes())
+                .unwrap_err()
+                .codes(),
+            expected
         );
     }
 }
