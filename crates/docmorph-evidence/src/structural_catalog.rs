@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    path::{Component, Path},
+};
 
+const MAX_SOURCE_BYTES: u64 = 1_048_576;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StructuralCatalog {
@@ -14,6 +19,12 @@ struct StructuralCatalog {
 #[serde(deny_unknown_fields)]
 struct Source {
     id: String,
+    path: Option<String>,
+    sha256: Option<String>,
+    provenance_path: Option<String>,
+    license_path: Option<String>,
+    distribution_path: Option<String>,
+    metadata_path: Option<String>,
     pages: Vec<Page>,
 }
 
@@ -118,6 +129,106 @@ pub(crate) fn validate_structural_catalog_bytes(
         catalog.catalog_id,
         format!("{:x}", Sha256::digest(canonical)),
     ))
+}
+
+pub(crate) fn validate_structural_catalog_sources(
+    bytes: &[u8],
+    repository_root: &Path,
+) -> Result<(), StructuralCatalogErrors> {
+    let catalog: StructuralCatalog = serde_json::from_slice(bytes)
+        .map_err(|_| StructuralCatalogErrors(vec!["structural_catalog_schema_invalid"]))?;
+    let mut errors = Vec::new();
+    let mut paths = Vec::new();
+    for source in &catalog.sources {
+        let Some(path) = source.path.as_deref() else {
+            errors.push("source_path_missing");
+            continue;
+        };
+        paths.push(path);
+        match confined_read(repository_root, path, MAX_SOURCE_BYTES) {
+            Ok(contents) => match source.sha256.as_deref() {
+                Some(expected) if expected == format!("{:x}", Sha256::digest(contents)) => {}
+                Some(_) => errors.push("source_digest_mismatch"),
+                None => errors.push("source_digest_missing"),
+            },
+            Err(code) => errors.push(code),
+        }
+        for (record, missing, unsafe_record) in [
+            (
+                source.provenance_path.as_deref(),
+                "source_provenance_missing",
+                "source_provenance_unsafe",
+            ),
+            (
+                source.license_path.as_deref(),
+                "source_license_missing",
+                "source_license_unsafe",
+            ),
+            (
+                source.distribution_path.as_deref(),
+                "source_distribution_missing",
+                "source_distribution_unsafe",
+            ),
+            (
+                source.metadata_path.as_deref(),
+                "source_metadata_missing",
+                "source_metadata_unsafe",
+            ),
+        ] {
+            validate_record(repository_root, record, missing, unsafe_record, &mut errors);
+        }
+    }
+    paths.sort_unstable();
+    if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+        errors.push("duplicate_source_path");
+    }
+    errors.sort_unstable();
+    errors.dedup();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(StructuralCatalogErrors(errors))
+    }
+}
+
+fn validate_record(
+    root: &Path,
+    path: Option<&str>,
+    missing: &'static str,
+    unsafe_record: &'static str,
+    errors: &mut Vec<&'static str>,
+) {
+    match path.and_then(|value| confined_read(root, value, MAX_SOURCE_BYTES).ok()) {
+        Some(contents) if !contents.is_empty() && std::str::from_utf8(&contents).is_ok() => {}
+        _ if path.is_none() => errors.push(missing),
+        _ => errors.push(unsafe_record),
+    }
+}
+
+fn confined_read(root: &Path, value: &str, maximum_size: u64) -> Result<Vec<u8>, &'static str> {
+    if value.is_empty()
+        || !Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err("source_path_unsafe");
+    }
+    let candidate = root.join(value);
+    let metadata = fs::symlink_metadata(&candidate).map_err(|_| "source_path_missing")?;
+    if !metadata.file_type().is_file() {
+        return Err("source_path_nonregular");
+    }
+    if metadata.len() > maximum_size {
+        return Err("source_path_oversized");
+    }
+    let canonical_root = root.canonicalize().map_err(|_| "source_path_unsafe")?;
+    let canonical_path = candidate
+        .canonicalize()
+        .map_err(|_| "source_path_missing")?;
+    if !canonical_path.starts_with(canonical_root) {
+        return Err("source_path_unsafe");
+    }
+    fs::read(canonical_path).map_err(|_| "source_path_missing")
 }
 
 fn canonical_id(value: &str) -> bool {
