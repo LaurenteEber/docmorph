@@ -5,6 +5,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+#[allow(dead_code)]
 #[path = "../src/catalog.rs"]
 mod catalog;
 
