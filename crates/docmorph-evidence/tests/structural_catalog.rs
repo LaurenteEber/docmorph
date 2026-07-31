@@ -1,6 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use sha2::{Digest, Sha256};
@@ -187,6 +189,59 @@ fn structural_source_provenance() {
         vec!["duplicate_source_path"]
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn structural_fixture_regeneration() {
+    let root = repository_root();
+    let manifest = root.join("fixtures/structural-pdf-corpus-manifest.json");
+    let bytes = fs::read(&manifest).expect("structural fixture manifest is distributed");
+    structural_catalog::validate_structural_catalog_sources(&bytes, &root)
+        .expect("structural fixture sources are authorized");
+    let catalog: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let sources = catalog["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    let mut geometries = BTreeSet::new();
+    let mut rotations = BTreeSet::new();
+    for (source_index, (source, expected)) in sources
+        .iter()
+        .zip([
+            ("letter-source", "page-1", [612, 792], 0),
+            ("landscape-source", "page-2", [842, 595], 90),
+        ])
+        .enumerate()
+    {
+        assert_eq!(source["id"], expected.0);
+        let authoring = root.join(source["authoring_path"].as_str().unwrap());
+        let pdf = root.join(source["path"].as_str().unwrap());
+        assert_eq!(
+            raw_sha256(&authoring),
+            source["authoring_sha256"].as_str().unwrap()
+        );
+        assert_eq!(raw_sha256(&pdf), source["sha256"].as_str().unwrap());
+        let generated =
+            std::env::temp_dir().join(format!("docmorph-structural-{source_index}.pdf"));
+        assert!(
+            Command::new("python3")
+                .args([authoring.as_os_str(), generated.as_os_str()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(fs::read(&generated).unwrap(), fs::read(&pdf).unwrap());
+        let pages = source["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 1);
+        let page = &pages[0];
+        assert_eq!(page["index"], 0);
+        assert_eq!(page["id"], expected.1);
+        assert_eq!(page["geometry"], serde_json::json!(expected.2));
+        assert_eq!(page["rotation_degrees"], serde_json::json!(expected.3));
+        geometries.insert(page["geometry"].to_string());
+        rotations.insert(page["rotation_degrees"].as_u64().unwrap());
+        let _ = fs::remove_file(generated);
+    }
+    assert_eq!(geometries.len(), 2);
+    assert!(rotations.contains(&90));
 }
 
 #[test]

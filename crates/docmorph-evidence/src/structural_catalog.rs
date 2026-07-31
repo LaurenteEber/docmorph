@@ -21,6 +21,8 @@ struct Source {
     id: String,
     path: Option<String>,
     sha256: Option<String>,
+    authoring_path: Option<String>,
+    authoring_sha256: Option<String>,
     provenance_path: Option<String>,
     license_path: Option<String>,
     distribution_path: Option<String>,
@@ -32,6 +34,9 @@ struct Source {
 #[serde(deny_unknown_fields)]
 struct Page {
     id: String,
+    index: Option<u32>,
+    geometry: Option<[u32; 2]>,
+    rotation_degrees: Option<u16>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
