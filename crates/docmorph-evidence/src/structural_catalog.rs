@@ -67,6 +67,21 @@ enum Operation {
         selection: Vec<PageRef>,
         partitions: Vec<Partition>,
     },
+    Rotate {
+        selection: Vec<PageRef>,
+        rotation_degrees: u16,
+        observation: Observation,
+    },
+    Reorder {
+        selection: Vec<PageRef>,
+        permutation: Vec<PageRef>,
+        observation: Observation,
+    },
+    DeleteSelectedPages {
+        selection: Vec<PageRef>,
+        removals: Vec<PageRef>,
+        observation: Observation,
+    },
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -199,7 +214,7 @@ fn validate_operation(
             if !same_origins(&expected, &observation.pages) {
                 errors.push("merge_sequence_invalid");
             } else {
-                validate_observation(&expected, observation, catalog, errors);
+                validate_observation(&expected, observation, catalog, 0, errors);
             }
         }
         Operation::Split {
@@ -232,9 +247,60 @@ fn validate_operation(
                     if !canonical_id(&partition.name) {
                         errors.push("split_partition_name_invalid");
                     }
-                    validate_observation(&partition.pages, &partition.observation, catalog, errors);
+                    validate_observation(
+                        &partition.pages,
+                        &partition.observation,
+                        catalog,
+                        0,
+                        errors,
+                    );
                 }
             }
+        }
+        Operation::Rotate {
+            selection,
+            rotation_degrees,
+            observation,
+        } => {
+            if selection.as_slice() != references {
+                errors.push("case_references_invalid");
+            }
+            if rotation_degrees % 90 != 0 {
+                errors.push("rotation_degrees_invalid");
+            }
+            validate_observation(selection, observation, catalog, *rotation_degrees, errors);
+        }
+        Operation::Reorder {
+            selection,
+            permutation,
+            observation,
+        } => {
+            if selection.as_slice() != references {
+                errors.push("case_references_invalid");
+            }
+            if has_duplicate_refs(permutation) || !same_ref_set(permutation, selection) {
+                errors.push("reorder_permutation_invalid");
+            }
+            validate_observation(permutation, observation, catalog, 0, errors);
+        }
+        Operation::DeleteSelectedPages {
+            selection,
+            removals,
+            observation,
+        } => {
+            if selection.as_slice() != references {
+                errors.push("case_references_invalid");
+            }
+            if has_duplicate_refs(removals) || !removals.iter().all(|page| selection.contains(page))
+            {
+                errors.push("delete_removals_invalid");
+            }
+            let retained = selection
+                .iter()
+                .filter(|page| !removals.contains(page))
+                .cloned()
+                .collect::<Vec<_>>();
+            validate_observation(&retained, observation, catalog, 0, errors);
         }
     }
 }
@@ -243,6 +309,7 @@ fn validate_observation(
     expected: &[PageRef],
     observation: &Observation,
     catalog: &StructuralCatalog,
+    rotation_degrees: u16,
     errors: &mut Vec<&'static str>,
 ) {
     if observation.baseline.is_some() {
@@ -269,7 +336,9 @@ fn validate_observation(
             continue;
         };
         if page.geometry != Some(observed.geometry)
-            || page.rotation_degrees != Some(observed.effective_rotation_degrees)
+            || observed.effective_rotation_degrees % 90 != 0
+            || (u32::from(page.rotation_degrees.unwrap_or(0)) + u32::from(rotation_degrees)) % 360
+                != u32::from(observed.effective_rotation_degrees)
         {
             errors.push("observation_invalid");
         }
