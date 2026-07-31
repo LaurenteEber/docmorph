@@ -293,3 +293,27 @@ fn structural_envelope_core() {
         );
     }
 }
+
+#[test]
+fn structural_merge_split() {
+    let document = r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"letter-source","pages":[{"id":"page-1","geometry":[612,792],"rotation_degrees":0}]},{"id":"landscape-source","pages":[{"id":"page-2","geometry":[842,595],"rotation_degrees":90}]}],"cases":[{"id":"merge","output":"merged","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"merge","inputs":[[{"source_id":"letter-source","page_id":"page-1"}],[{"source_id":"landscape-source","page_id":"page-2"}]],"observation":{"page_count":2,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0},{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]} }},{"id":"split","output":"split","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"split","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"partitions":[{"name":"first","pages":[{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0}]}},{"name":"second","pages":[{"source_id":"landscape-source","page_id":"page-2"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]}}]}}]}"#;
+    assert!(structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).is_ok());
+    for (actual, expected) in [
+        (document.replacen("\"page_count\":2", "\"baseline\":\"candidate.pdf\",\"page_count\":2", 1), "observation_baseline_forbidden"),
+        (document.replacen("\"page_count\":1", "\"baseline\":\"candidate.pdf\",\"page_count\":1", 1), "observation_baseline_forbidden"),
+        (document.replacen("\"page_count\":2,", "", 1), "structural_catalog_schema_invalid"),
+        (document.replacen("\"page_count\":1,", "", 1), "structural_catalog_schema_invalid"),
+        (document.replacen("\"origin\":{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}", "\"origin\":{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}", 1), "merge_sequence_invalid"),
+        (document.replacen("\"pages\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", "\"pages\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", 1), "split_overlap"),
+        (document.replacen("\"pages\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", "\"pages\":[]", 1), "split_coverage_invalid"),
+        (document.replacen("\"output\":\"split\",\"references\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"},{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", "\"output\":\"split\",\"references\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", 1).replacen("\"selection\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"},{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", "\"selection\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", 1), "split_order_invalid"),
+        (document.replace("\"references\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"},{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", "\"references\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]"), "case_references_invalid"),
+    ] {
+        assert_eq!(
+            structural_catalog::validate_structural_catalog_bytes(actual.as_bytes())
+            .unwrap_err()
+            .codes(),
+            vec![expected]
+        );
+    }
+}

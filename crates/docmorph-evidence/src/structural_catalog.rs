@@ -45,13 +45,53 @@ struct Case {
     id: String,
     output: String,
     references: Vec<PageRef>,
+    #[serde(default)]
+    operation: Option<Operation>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PageRef {
     source_id: String,
     page_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Operation {
+    Merge {
+        inputs: Vec<Vec<PageRef>>,
+        observation: Observation,
+    },
+    Split {
+        selection: Vec<PageRef>,
+        partitions: Vec<Partition>,
+    },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Partition {
+    name: String,
+    pages: Vec<PageRef>,
+    observation: Observation,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Observation {
+    page_count: usize,
+    pages: Vec<ObservedPage>,
+    #[serde(default)]
+    baseline: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ObservedPage {
+    origin: PageRef,
+    geometry: [u32; 2],
+    effective_rotation_degrees: u16,
 }
 
 #[derive(Debug)]
@@ -124,6 +164,11 @@ pub(crate) fn validate_structural_catalog_bytes(
             });
         }
     }
+    for case in &catalog.cases {
+        if let Some(operation) = &case.operation {
+            validate_operation(operation, &case.references, &catalog, &mut errors);
+        }
+    }
     errors.sort();
     errors.dedup();
     if !errors.is_empty() {
@@ -134,6 +179,113 @@ pub(crate) fn validate_structural_catalog_bytes(
         catalog.catalog_id,
         format!("{:x}", Sha256::digest(canonical)),
     ))
+}
+
+fn validate_operation(
+    operation: &Operation,
+    references: &[PageRef],
+    catalog: &StructuralCatalog,
+    errors: &mut Vec<&'static str>,
+) {
+    match operation {
+        Operation::Merge {
+            inputs,
+            observation,
+        } => {
+            let expected = inputs.iter().flatten().cloned().collect::<Vec<_>>();
+            if expected.as_slice() != references {
+                errors.push("case_references_invalid");
+            }
+            if !same_origins(&expected, &observation.pages) {
+                errors.push("merge_sequence_invalid");
+            } else {
+                validate_observation(&expected, observation, catalog, errors);
+            }
+        }
+        Operation::Split {
+            selection,
+            partitions,
+        } => {
+            if selection.as_slice() != references {
+                errors.push("case_references_invalid");
+            }
+            let pages = partitions
+                .iter()
+                .flat_map(|partition| partition.pages.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            if has_duplicate_refs(&pages) {
+                errors.push("split_overlap");
+            } else if !same_ref_set(&pages, selection) {
+                errors.push("split_coverage_invalid");
+            } else if pages != *selection {
+                errors.push("split_order_invalid");
+            } else {
+                if partitions.iter().enumerate().any(|(index, partition)| {
+                    partitions[..index]
+                        .iter()
+                        .any(|prior| prior.name == partition.name)
+                }) {
+                    errors.push("duplicate_split_partition_name");
+                }
+                for partition in partitions {
+                    if !canonical_id(&partition.name) {
+                        errors.push("split_partition_name_invalid");
+                    }
+                    validate_observation(&partition.pages, &partition.observation, catalog, errors);
+                }
+            }
+        }
+    }
+}
+
+fn validate_observation(
+    expected: &[PageRef],
+    observation: &Observation,
+    catalog: &StructuralCatalog,
+    errors: &mut Vec<&'static str>,
+) {
+    if observation.baseline.is_some() {
+        errors.push("observation_baseline_forbidden");
+        return;
+    }
+    if observation.page_count != expected.len() || !same_origins(expected, &observation.pages) {
+        errors.push("observation_invalid");
+        return;
+    }
+    for observed in &observation.pages {
+        let Some(page) = catalog
+            .sources
+            .iter()
+            .find(|source| source.id == observed.origin.source_id)
+            .and_then(|source| {
+                source
+                    .pages
+                    .iter()
+                    .find(|page| page.id == observed.origin.page_id)
+            })
+        else {
+            errors.push("dangling_page_ref");
+            continue;
+        };
+        if page.geometry != Some(observed.geometry)
+            || page.rotation_degrees != Some(observed.effective_rotation_degrees)
+        {
+            errors.push("observation_invalid");
+        }
+    }
+}
+
+fn same_origins(expected: &[PageRef], observed: &[ObservedPage]) -> bool {
+    expected.iter().eq(observed.iter().map(|page| &page.origin))
+}
+
+fn has_duplicate_refs(references: &[PageRef]) -> bool {
+    (1..references.len()).any(|index| references[..index].contains(&references[index]))
+}
+
+fn same_ref_set(left: &[PageRef], right: &[PageRef]) -> bool {
+    left.len() == right.len() && left.iter().all(|reference| right.contains(reference))
 }
 
 pub(crate) fn validate_structural_catalog_sources(

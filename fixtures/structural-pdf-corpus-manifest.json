@@ -31,5 +31,16 @@
       ]
     }
   ],
-  "cases": []
+  "cases": [
+    {
+      "id": "merge-pages", "output": "merged-pages",
+      "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }],
+      "operation": { "kind": "merge", "inputs": [[{ "source_id": "letter-source", "page_id": "page-1" }], [{ "source_id": "landscape-source", "page_id": "page-2" }]], "observation": { "page_count": 2, "pages": [{ "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 0 }, { "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }] } }
+    },
+    {
+      "id": "split-pages", "output": "split-pages",
+      "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }],
+      "operation": { "kind": "split", "selection": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "partitions": [{ "name": "first", "pages": [{ "source_id": "letter-source", "page_id": "page-1" }], "observation": { "page_count": 1, "pages": [{ "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 0 }] } }, { "name": "second", "pages": [{ "source_id": "landscape-source", "page_id": "page-2" }], "observation": { "page_count": 1, "pages": [{ "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }] } }] }
+    }
+  ]
 }
