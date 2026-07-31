@@ -100,6 +100,95 @@ fn structural_catalog_document() -> String {
     r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
 }
 
+fn source_catalog_document() -> String {
+    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","path":"fixtures/source.pdf","sha256":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9","provenance_path":"records/provenance.txt","license_path":"records/license.txt","distribution_path":"records/distribution.txt","metadata_path":"records/metadata.json","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
+}
+
+#[test]
+fn structural_source_provenance() {
+    let root = std::env::temp_dir().join(format!("docmorph-source-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("fixtures")).unwrap();
+    fs::create_dir_all(root.join("fixtures/directory")).unwrap();
+    fs::create_dir_all(root.join("records")).unwrap();
+    fs::write(root.join("fixtures/source.pdf"), b"hello world").unwrap();
+    fs::write(root.join("fixtures/large.pdf"), vec![0; 1_048_577]).unwrap();
+    for path in [
+        "provenance.txt",
+        "license.txt",
+        "distribution.txt",
+        "metadata.json",
+    ] {
+        fs::write(root.join("records").join(path), b"declared").unwrap();
+    }
+    let document = source_catalog_document();
+    assert!(
+        structural_catalog::validate_structural_catalog_sources(document.as_bytes(), &root).is_ok()
+    );
+    for (actual, expected) in [
+        (
+            document.replace("fixtures/source.pdf", "../source.pdf"),
+            "source_path_unsafe",
+        ),
+        (
+            document.replace("fixtures/source.pdf", "fixtures/missing.pdf"),
+            "source_path_missing",
+        ),
+        (
+            document.replace("fixtures/source.pdf", "fixtures/directory"),
+            "source_path_nonregular",
+        ),
+        (
+            document.replace("fixtures/source.pdf", "fixtures/large.pdf"),
+            "source_path_oversized",
+        ),
+        (
+            document.replace(
+                "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            "source_digest_mismatch",
+        ),
+        (
+            document.replace("\"provenance_path\":\"records/provenance.txt\",", ""),
+            "source_provenance_missing",
+        ),
+        (
+            document.replace("records/license.txt", "../license.txt"),
+            "source_license_unsafe",
+        ),
+        (
+            document.replace("records/distribution.txt", "../distribution.txt"),
+            "source_distribution_unsafe",
+        ),
+        (
+            document.replace("records/metadata.json", "../metadata.json"),
+            "source_metadata_unsafe",
+        ),
+    ] {
+        assert_eq!(
+            structural_catalog::validate_structural_catalog_sources(actual.as_bytes(), &root)
+                .unwrap_err()
+                .codes(),
+            vec![expected]
+        );
+    }
+    let mut duplicate: serde_json::Value = serde_json::from_str(&document).unwrap();
+    let mut source = duplicate["sources"][0].clone();
+    source["id"] = "source-two".into();
+    duplicate["sources"].as_array_mut().unwrap().push(source);
+    assert_eq!(
+        structural_catalog::validate_structural_catalog_sources(
+            serde_json::to_string(&duplicate).unwrap().as_bytes(),
+            &root,
+        )
+        .unwrap_err()
+        .codes(),
+        vec!["duplicate_source_path"]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn structural_envelope_core() {
     let document = structural_catalog_document();
