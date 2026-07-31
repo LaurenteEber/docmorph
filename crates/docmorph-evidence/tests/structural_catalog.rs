@@ -317,3 +317,40 @@ fn structural_merge_split() {
         );
     }
 }
+
+#[test]
+fn structural_rotate_reorder_delete() {
+    let document = r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"letter-source","pages":[{"id":"page-1","geometry":[612,792],"rotation_degrees":0}]},{"id":"landscape-source","pages":[{"id":"page-2","geometry":[842,595],"rotation_degrees":90}]}],"cases":[{"id":"rotate","output":"rotated","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"rotate","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"rotation_degrees":270,"observation":{"page_count":2,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":270},{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":0}]} }},{"id":"reorder","output":"reordered","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"reorder","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"permutation":[{"source_id":"landscape-source","page_id":"page-2"},{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":2,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90},{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0}]}}},{"id":"delete","output":"deleted","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"delete_selected_pages","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"removals":[{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]}}}]}"#;
+    assert!(structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).is_ok());
+    assert_eq!(
+        structural_catalog::validate_structural_catalog_bytes(
+            document
+                .replace(
+                    "\"observation\":{",
+                    "\"observation\":{\"baseline\":\"candidate.pdf\", "
+                )
+                .as_bytes()
+        )
+        .unwrap_err()
+        .codes(),
+        vec!["observation_baseline_forbidden"]
+    );
+    assert_eq!(
+        structural_catalog::validate_structural_catalog_bytes(
+            document.replace("\"page_count\":", "\"count\":").as_bytes()
+        )
+        .unwrap_err()
+        .codes(),
+        vec!["structural_catalog_schema_invalid"]
+    );
+    for (actual, expected) in [
+        (document.replacen("\"page_count\":2", "\"baseline\":\"candidate.pdf\",\"page_count\":2", 1), vec!["observation_baseline_forbidden"]),
+        (document.replacen("\"rotation_degrees\":270", "\"rotation_degrees\":45", 1), vec!["observation_invalid", "rotation_degrees_invalid"]),
+        (document.replacen("\"permutation\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", "\"permutation\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"},{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", 1), vec!["observation_invalid", "reorder_permutation_invalid"]),
+        (document.replacen("\"removals\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", "\"removals\":[{\"source_id\":\"missing\",\"page_id\":\"page\"}]", 1), vec!["delete_removals_invalid", "observation_invalid"]),
+        (document.replacen("\"removals\":[{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"}]", "\"removals\":[{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"}]", 1), vec!["observation_invalid"]),
+        (document.replacen("\"page_count\":1", "\"page_count\":2", 1).replacen("[{\"origin\":{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},\"geometry\":[842,595],\"effective_rotation_degrees\":90}]}}}]}", "[{\"origin\":{\"source_id\":\"letter-source\",\"page_id\":\"page-1\"},\"geometry\":[612,792],\"effective_rotation_degrees\":0},{\"origin\":{\"source_id\":\"landscape-source\",\"page_id\":\"page-2\"},\"geometry\":[842,595],\"effective_rotation_degrees\":90}]}}}]}", 1), vec!["observation_invalid"]),
+    ] {
+        assert_eq!(structural_catalog::validate_structural_catalog_bytes(actual.as_bytes()).unwrap_err().codes(), expected);
+    }
+}
