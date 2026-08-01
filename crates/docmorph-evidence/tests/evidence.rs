@@ -93,6 +93,17 @@ fn run_arguments(arguments: &[PathBuf]) -> Output {
         .expect("evidence binary spawns")
 }
 
+fn named_arguments(root: &std::path::Path, run_root: &std::path::Path) -> Vec<PathBuf> {
+    vec![
+        "--named-run".into(),
+        "synthetic-smoke".into(),
+        "--run-root".into(),
+        run_root.to_path_buf(),
+        "--repository-root".into(),
+        root.to_path_buf(),
+    ]
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -381,6 +392,160 @@ fn governed_preflight_rejects_invalid_inputs_before_output_side_effects() {
         assert!(!receipt_dir.join("receipt.json").exists(), "{key}");
         assert!(!receipt_dir.join("artifacts").exists(), "{key}");
     }
+}
+
+#[test]
+fn named_routing_rejects_mixed_modes_and_unknown_names_before_writes() {
+    let root = TempRoot::new();
+    let named_root = root.0.join("named-run");
+    let mut mixed = named_arguments(&repository_root(), &named_root);
+    mixed.extend([
+        "--manifest".into(),
+        manifest(),
+        "--receipt-dir".into(),
+        root.0.join("legacy-receipt"),
+        "--catalog".into(),
+        catalog(),
+    ]);
+
+    for (arguments, error) in [
+        (mixed, "argument_modes_mixed"),
+        (
+            vec!["--named-run".into(), "unknown".into()],
+            "named_run_unknown:unknown",
+        ),
+    ] {
+        let output = run_arguments(&arguments);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("docmorph-evidence: {error}\n")
+        );
+        assert!(!named_root.exists());
+    }
+}
+
+#[test]
+fn named_definition_requires_the_versioned_ordered_governed_membership() {
+    let root = TempRoot::new();
+    let catalog =
+        catalog::validate_catalog_bytes(&fs::read(catalog()).unwrap(), &repository_root()).unwrap();
+    let valid = r#"{"schema_version":"1.0","run_name":"synthetic-smoke","catalog_id":"docmorph-phase1-synthetic-smoke","cases":[{"id":"policy-failure","operation_manifest":"fixtures/evidence-policy-failure-manifest.json"},{"id":"success","operation_manifest":"fixtures/evidence-success-manifest.json"}]}"#;
+
+    assert!(catalog::validate_named_definition_bytes(valid.as_bytes(), &catalog).is_ok());
+    for (definition, code) in [
+        ("{}", "named_definition_schema_invalid"),
+        (
+            &valid.replace("\"1.0\"", "\"2.0\""),
+            "named_definition_schema_version_unsupported",
+        ),
+        (
+            &valid.replace("synthetic-smoke", "other"),
+            "named_definition_run_name_invalid",
+        ),
+        (
+            &valid.replace("policy-failure", "unknown"),
+            "named_definition_member_unknown",
+        ),
+        (
+            &valid.replacen("success", "policy-failure", 1),
+            "named_definition_member_duplicate",
+        ),
+        (
+            &valid.replace(
+                "{\"id\":\"policy-failure\",\"operation_manifest\":\"fixtures/evidence-policy-failure-manifest.json\"},{\"id\":\"success\",\"operation_manifest\":\"fixtures/evidence-success-manifest.json\"}",
+                "{\"id\":\"success\",\"operation_manifest\":\"fixtures/evidence-success-manifest.json\"},{\"id\":\"policy-failure\",\"operation_manifest\":\"fixtures/evidence-policy-failure-manifest.json\"}",
+            ),
+            "named_definition_members_reordered",
+        ),
+        (
+            &valid.replace(
+                ",{\"id\":\"success\",\"operation_manifest\":\"fixtures/evidence-success-manifest.json\"}",
+                "",
+            ),
+            "named_definition_members_omitted",
+        ),
+        (
+            &valid.replace("fixtures/evidence-success-manifest.json", "../escape.json"),
+            "named_definition_member_path_not_repository_relative",
+        ),
+        (
+            &valid.replace("}", ",\"unknown\":true}"),
+            "named_definition_schema_invalid",
+        ),
+    ] {
+        assert_eq!(
+            catalog::validate_named_definition_bytes(definition.as_bytes(), &catalog)
+                .unwrap_err()
+                .codes(),
+            [code]
+        );
+    }
+    assert!(!root.0.join("named-run").exists());
+}
+
+#[test]
+fn named_mode_validates_its_default_definition_before_creating_a_run_root() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let invalid_definition = root.0.join("invalid-definition.json");
+    fs::write(&invalid_definition, b"{}").unwrap();
+    let mut arguments = named_arguments(&repository_root(), &run_root);
+    arguments.extend(["--run-definition".into(), invalid_definition]);
+
+    let output = run_arguments(&arguments);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "docmorph-evidence: named_definition_invalid:named_definition_schema_invalid\n"
+    );
+    assert!(!run_root.exists());
+}
+
+#[test]
+fn valid_named_mode_reports_execution_not_implemented_without_creating_run_root() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&repository_root(), &run_root));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "docmorph-evidence: named_run_execution_not_implemented\n"
+    );
+    assert!(!run_root.exists());
+}
+
+#[test]
+fn legacy_manifest_keeps_receipt_1_2_bytes_and_exit_contract() {
+    let root = TempRoot::new();
+    let receipt_dir = root.0.join("receipt");
+    let success = run(&manifest(), &receipt_dir);
+    assert_eq!(success.status.code(), Some(0));
+    let receipt = fs::read(receipt_dir.join("receipt.json")).unwrap();
+    assert!(receipt.starts_with(
+        b"{\"schema_version\":\"1.2\",\"catalog_id\":\"docmorph-phase1-synthetic-smoke\""
+    ));
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+    assert_eq!(receipt["schema_version"], "1.2");
+    assert_eq!(receipt["outcomes"][0]["id"], "success");
+    assert_eq!(receipt["outcomes"][1]["id"], "policy-failure");
+
+    let invalid = run_arguments(&[
+        "--manifest".into(),
+        manifest(),
+        "--receipt-dir".into(),
+        root.0.join("invalid"),
+        "--catalog".into(),
+        catalog(),
+        "--repository-root".into(),
+        root.0.join("missing"),
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(invalid.stderr).unwrap(),
+        "docmorph-evidence: catalog_invalid:repository_root_invalid\n"
+    );
 }
 
 #[test]

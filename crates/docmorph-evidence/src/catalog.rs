@@ -94,6 +94,7 @@ pub struct ValidatedCatalog {
     pub catalog_id: String,
     pub revision_sha256: String,
     pub execution_revision_sha256: String,
+    fixture_ids: Vec<String>,
     baselines: BTreeMap<String, ValidatedBaseline>,
 }
 #[derive(Clone, Debug)]
@@ -109,6 +110,96 @@ impl ValidatedCatalog {
     pub(crate) fn baseline(&self, id: &str) -> Option<&ValidatedBaseline> {
         self.baselines.get(id)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedRunDefinition {
+    schema_version: String,
+    run_name: String,
+    catalog_id: String,
+    cases: Vec<NamedRunCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedRunCase {
+    id: String,
+    operation_manifest: String,
+}
+
+#[derive(Debug)]
+pub struct NamedDefinitionErrors(Vec<&'static str>);
+
+impl NamedDefinitionErrors {
+    pub fn codes(&self) -> Vec<&'static str> {
+        self.0.clone()
+    }
+}
+
+pub fn validate_named_definition_bytes(
+    bytes: &[u8],
+    catalog: &ValidatedCatalog,
+) -> Result<(), NamedDefinitionErrors> {
+    let definition: NamedRunDefinition = serde_json::from_slice(bytes)
+        .map_err(|_| NamedDefinitionErrors(vec!["named_definition_schema_invalid"]))?;
+    if definition.schema_version != "1.0" {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_schema_version_unsupported",
+        ]));
+    }
+    if definition.run_name != "synthetic-smoke" {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_run_name_invalid",
+        ]));
+    }
+    if definition.catalog_id != "docmorph-phase1-synthetic-smoke"
+        || definition.catalog_id != catalog.catalog_id
+    {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_catalog_invalid",
+        ]));
+    }
+    let expected = ["policy-failure", "success"];
+    let ids = definition
+        .cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<Vec<_>>();
+    if ids.iter().any(|id| !expected.contains(id)) {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_member_unknown",
+        ]));
+    }
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_member_duplicate",
+        ]));
+    }
+    if ids != expected {
+        return Err(NamedDefinitionErrors(vec![
+            if ids.len() != expected.len() {
+                "named_definition_members_omitted"
+            } else {
+                "named_definition_members_reordered"
+            },
+        ]));
+    }
+    if catalog.fixture_ids != expected {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_catalog_invalid",
+        ]));
+    }
+    if definition
+        .cases
+        .iter()
+        .any(|case| !safe_relative(&case.operation_manifest))
+    {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_member_path_not_repository_relative",
+        ]));
+    }
+    Ok(())
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CatalogError {
@@ -188,6 +279,7 @@ pub fn validate_catalog_bytes(
         catalog_id: catalog.catalog_id,
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
         execution_revision_sha256,
+        fixture_ids: fixtures.iter().map(|fixture| fixture.id.clone()).collect(),
         baselines,
     })
 }

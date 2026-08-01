@@ -2,6 +2,7 @@
 
 #[allow(dead_code)]
 mod catalog;
+mod legacy;
 #[allow(dead_code)]
 mod structural_catalog;
 
@@ -134,6 +135,14 @@ struct Arguments {
     repository_root: PathBuf,
 }
 
+struct NamedArguments {
+    run_name: String,
+    run_root: PathBuf,
+    repository_root: PathBuf,
+    run_definition: PathBuf,
+    catalog: PathBuf,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -146,7 +155,19 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let command = env::args().collect::<Vec<_>>();
+    if command
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--named-run")
+    {
+        let arguments = parse_named_arguments(command.iter().skip(1).cloned())?;
+        return validate_named_route(&arguments);
+    }
     let arguments = parse_arguments(command.iter().skip(1).cloned())?;
+    legacy::execute(command, arguments)
+}
+
+fn execute_legacy(command: Vec<String>, arguments: Arguments) -> Result<(), String> {
     let catalog_bytes =
         fs::read(&arguments.catalog).map_err(|_| "catalog_unreadable".to_owned())?;
     if !arguments.repository_root.is_dir() {
@@ -233,6 +254,22 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("receipt cannot serialize: {error}"))?,
     )
     .map_err(|error| format!("receipt cannot be retained: {error}"))
+}
+
+fn validate_named_route(arguments: &NamedArguments) -> Result<(), String> {
+    if arguments.run_name != "synthetic-smoke" {
+        return Err(format!("named_run_unknown:{}", arguments.run_name));
+    }
+    let catalog_bytes =
+        fs::read(&arguments.catalog).map_err(|_| "catalog_unreadable".to_owned())?;
+    let catalog = catalog::validate_catalog_bytes(&catalog_bytes, &arguments.repository_root)
+        .map_err(|errors| format!("catalog_invalid:{}", errors.codes()[0]))?;
+    let definition = fs::read(&arguments.run_definition)
+        .map_err(|_| "named_definition_unreadable".to_owned())?;
+    catalog::validate_named_definition_bytes(&definition, &catalog)
+        .map_err(|errors| format!("named_definition_invalid:{}", errors.codes()[0]))?;
+    let _ = &arguments.run_root;
+    Err("named_run_execution_not_implemented".to_owned())
 }
 
 fn run_fixture(
@@ -377,6 +414,40 @@ fn parse_arguments(arguments: impl Iterator<Item = String>) -> Result<Arguments,
         catalog: catalog.ok_or_else(|| "argument_missing:--catalog".to_owned())?,
         repository_root: repository_root
             .ok_or_else(|| "argument_missing:--repository-root".to_owned())?,
+    })
+}
+
+fn parse_named_arguments(
+    arguments: impl Iterator<Item = String>,
+) -> Result<NamedArguments, String> {
+    let mut arguments = arguments;
+    let mut run_name = None;
+    let mut run_root = None;
+    let mut repository_root = None;
+    let mut run_definition = None;
+    let mut catalog = None;
+    while let Some(argument) = arguments.next() {
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("argument_value_missing:{argument}"))?;
+        match argument.as_str() {
+            "--named-run" => run_name = Some(value),
+            "--run-root" => run_root = Some(value.into()),
+            "--repository-root" => repository_root = Some(value.into()),
+            "--run-definition" => run_definition = Some(value.into()),
+            "--catalog" => catalog = Some(value.into()),
+            "--manifest" | "--receipt-dir" => return Err("argument_modes_mixed".to_owned()),
+            _ => return Err(format!("argument_unknown:{argument}")),
+        }
+    }
+    let repository_root = repository_root.unwrap_or_else(|| PathBuf::from("."));
+    Ok(NamedArguments {
+        run_name: run_name.ok_or_else(|| "argument_missing:--named-run".to_owned())?,
+        run_root: run_root.unwrap_or_else(|| PathBuf::from("evidence/synthetic-smoke-run")),
+        repository_root: repository_root.clone(),
+        run_definition: run_definition
+            .unwrap_or_else(|| repository_root.join("fixtures/named-runs/synthetic-smoke.json")),
+        catalog: catalog.unwrap_or_else(|| repository_root.join("fixtures/corpus-manifest.json")),
     })
 }
 
