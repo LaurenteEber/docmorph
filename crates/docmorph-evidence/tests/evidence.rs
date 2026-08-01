@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "../src/catalog.rs"]
 mod catalog;
+#[path = "../src/report.rs"]
+mod report;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -612,6 +614,108 @@ fn named_execution_continues_after_a_case_execution_failure() {
             .contains("named_run_case_failed:policy-failure")
     );
     assert!(run_root.join("cases/01-success/receipt.json").is_file());
+}
+
+fn named_case(id: &str) -> report::CaseRecord {
+    report::CaseRecord {
+        id: id.into(),
+        operation_manifest_sha256: "a".repeat(64),
+        declared_outcome: report::Outcome::Success,
+        observed_outcome: report::Outcome::Success,
+        expected_primary_diagnostic_code: None,
+        observed_primary_diagnostic_code: None,
+        declared_input_sha256: Some("b".repeat(64)),
+        artifact_sha256: Some("c".repeat(64)),
+        artifact_byte_len: Some(37),
+        baseline_receipt_semantic_sha256: Some("d".repeat(64)),
+        observed_receipt_semantic_sha256: Some("d".repeat(64)),
+        contract_state: report::ContractState::Satisfied,
+        baseline_state: report::BaselineState::NotCompared,
+        execution_error_code: None,
+        retention_error_code: None,
+    }
+}
+
+#[test]
+fn named_report_projection_is_compact_ordered_and_self_excluding() {
+    let report = report::Report::new(
+        "e".repeat(64),
+        "f".repeat(64),
+        report::Environment::current(),
+        vec![named_case("policy-failure"), named_case("success")],
+    );
+
+    let bytes = report.canonical_bytes().unwrap();
+    let json = String::from_utf8(bytes.clone()).unwrap();
+    assert!(!json.contains("\"semantic_sha256\":"));
+    assert!(!json.contains([' ', '\n']));
+    assert!(json.contains("\"declared_input_sha256\":\"bbbb"));
+    assert!(json.contains("\"expected_primary_diagnostic_code\":null"));
+    assert!(json.find("policy-failure").unwrap() < json.find("success").unwrap());
+    assert_eq!(
+        report.semantic_sha256(),
+        format!("{:x}", Sha256::digest(bytes))
+    );
+}
+
+#[test]
+fn named_report_comparison_and_exit_precedence_are_closed() {
+    let environment = report::Environment::current();
+    let mut matching = named_case("policy-failure");
+    report::compare_case(&mut matching, &environment, &environment);
+    assert_eq!(matching.baseline_state, report::BaselineState::Match);
+    assert_eq!(
+        report::resolve_outcome(&[matching]),
+        (report::OverallState::CompleteMatch, 0)
+    );
+
+    let mut mismatched = named_case("success");
+    mismatched.observed_receipt_semantic_sha256 = Some("e".repeat(64));
+    report::compare_case(&mut mismatched, &environment, &environment);
+    assert_eq!(mismatched.baseline_state, report::BaselineState::Mismatch);
+    assert_eq!(
+        report::resolve_outcome(&[mismatched]),
+        (report::OverallState::BaselineMismatch, 4)
+    );
+
+    let mut incompatible = named_case("success");
+    let different = report::Environment::different_from(&environment);
+    report::compare_case(&mut incompatible, &environment, &different);
+    assert_eq!(
+        incompatible.baseline_state,
+        report::BaselineState::IncomparableEnvironment
+    );
+    incompatible.contract_state = report::ContractState::EvidenceRetentionFailed;
+    assert_eq!(
+        report::resolve_outcome(&[incompatible]),
+        (report::OverallState::IncomparableEnvironment, 5)
+    );
+
+    let mut expected_failure = named_case("policy-failure");
+    expected_failure.declared_outcome = report::Outcome::Failure;
+    expected_failure.observed_outcome = report::Outcome::Failure;
+    expected_failure.expected_primary_diagnostic_code = Some("input_outside_allowed_root".into());
+    expected_failure.observed_primary_diagnostic_code = Some("input_outside_allowed_root".into());
+    expected_failure.contract_state = report::evaluate_contract(
+        expected_failure.declared_outcome,
+        expected_failure.observed_outcome,
+        expected_failure.expected_primary_diagnostic_code.as_deref(),
+        expected_failure.observed_primary_diagnostic_code.as_deref(),
+        None,
+        None,
+    );
+    assert_eq!(
+        report::resolve_outcome(&[expected_failure]),
+        (report::OverallState::CompleteMatch, 0)
+    );
+
+    let mut not_compared = named_case("success");
+    not_compared.baseline_receipt_semantic_sha256 = None;
+    report::compare_case(&mut not_compared, &environment, &environment);
+    assert_eq!(
+        not_compared.baseline_state,
+        report::BaselineState::NotCompared
+    );
 }
 
 #[test]
