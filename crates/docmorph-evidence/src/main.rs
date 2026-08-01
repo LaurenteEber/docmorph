@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 mod catalog;
 mod legacy;
+#[allow(dead_code)] // PR4 consumes the in-memory report model when publication is introduced.
+mod report;
 #[allow(dead_code)]
 mod structural_catalog;
 
