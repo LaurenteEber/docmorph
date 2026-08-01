@@ -112,7 +112,7 @@ impl ValidatedCatalog {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NamedRunDefinition {
     schema_version: String,
@@ -121,11 +121,11 @@ struct NamedRunDefinition {
     cases: Vec<NamedRunCase>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NamedRunCase {
-    id: String,
-    operation_manifest: String,
+pub struct NamedRunCase {
+    pub id: String,
+    pub operation_manifest: String,
 }
 
 #[derive(Debug)]
@@ -140,7 +140,7 @@ impl NamedDefinitionErrors {
 pub fn validate_named_definition_bytes(
     bytes: &[u8],
     catalog: &ValidatedCatalog,
-) -> Result<(), NamedDefinitionErrors> {
+) -> Result<Vec<NamedRunCase>, NamedDefinitionErrors> {
     let definition: NamedRunDefinition = serde_json::from_slice(bytes)
         .map_err(|_| NamedDefinitionErrors(vec!["named_definition_schema_invalid"]))?;
     if definition.schema_version != "1.0" {
@@ -199,7 +199,18 @@ pub fn validate_named_definition_bytes(
             "named_definition_member_path_not_repository_relative",
         ]));
     }
-    Ok(())
+    if definition.cases.iter().any(|case| {
+        catalog
+            .baselines
+            .get(&case.id)
+            .map(|baseline| baseline._link.operation_manifest.as_str())
+            .is_some_and(|expected| expected != case.operation_manifest)
+    }) {
+        return Err(NamedDefinitionErrors(vec![
+            "named_definition_member_operation_manifest_invalid",
+        ]));
+    }
+    Ok(definition.cases)
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CatalogError {
