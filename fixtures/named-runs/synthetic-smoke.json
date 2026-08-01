@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "run_name": "synthetic-smoke",
+  "catalog_id": "docmorph-phase1-synthetic-smoke",
+  "cases": [
+    {
+      "id": "policy-failure",
+      "operation_manifest": "fixtures/evidence-policy-failure-manifest.json"
+    },
+    {
+      "id": "success",
+      "operation_manifest": "fixtures/evidence-success-manifest.json"
+    }
+  ]
+}
