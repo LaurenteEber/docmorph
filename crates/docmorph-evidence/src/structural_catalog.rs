@@ -21,8 +21,8 @@ struct Source {
     id: String,
     path: Option<String>,
     sha256: Option<String>,
-    authoring_path: Option<String>,
-    authoring_sha256: Option<String>,
+    authoring_path: String,
+    authoring_sha256: String,
     provenance_path: Option<String>,
     license_path: Option<String>,
     distribution_path: Option<String>,
@@ -379,6 +379,12 @@ pub(crate) fn validate_structural_catalog_sources(
             },
             Err(code) => errors.push(code),
         }
+        validate_authoring(
+            repository_root,
+            &source.authoring_path,
+            &source.authoring_sha256,
+            &mut errors,
+        );
         for (record, missing, unsafe_record) in [
             (
                 source.provenance_path.as_deref(),
@@ -417,6 +423,108 @@ pub(crate) fn validate_structural_catalog_sources(
     }
 }
 
+pub(crate) fn validate_structural_documentation(
+    repository_root: &Path,
+    documents: &[&str],
+) -> Result<(), StructuralCatalogErrors> {
+    let mut errors = Vec::new();
+    let mut text = String::new();
+    for document in documents {
+        match confined_read(repository_root, document, MAX_SOURCE_BYTES) {
+            Ok(contents) => match String::from_utf8(contents) {
+                Ok(contents) => {
+                    for reference in markdown_references(&contents) {
+                        let path = Path::new(document)
+                            .parent()
+                            .unwrap_or_else(|| Path::new(""))
+                            .join(reference);
+                        match confined_read(
+                            repository_root,
+                            &path.to_string_lossy(),
+                            MAX_SOURCE_BYTES,
+                        ) {
+                            Ok(_) => {}
+                            Err("source_path_unsafe") => {
+                                errors.push("documentation_reference_unsafe")
+                            }
+                            Err("source_path_missing") => {
+                                errors.push("documentation_reference_missing")
+                            }
+                            Err(_) => errors.push("documentation_reference_unsupported"),
+                        }
+                    }
+                    text.push('\n');
+                    text.push_str(&contents.to_ascii_lowercase());
+                }
+                Err(_) => errors.push("documentation_reference_unsupported"),
+            },
+            Err("source_path_unsafe") => errors.push("documentation_reference_unsafe"),
+            Err("source_path_missing") => errors.push("documentation_reference_missing"),
+            Err(_) => errors.push("documentation_reference_unsupported"),
+        }
+    }
+    if [
+        "project-authored",
+        "clean checkout",
+        "structural-only",
+        "baseline-free",
+    ]
+    .iter()
+    .any(|required| !text.contains(required))
+    {
+        errors.push("documentation_truthfulness_missing");
+    }
+    if documentation_claim_unsupported(&text) {
+        errors.push("documentation_claim_unsupported");
+    }
+    errors.sort_unstable();
+    errors.dedup();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(StructuralCatalogErrors(errors))
+    }
+}
+
+fn documentation_claim_unsupported(text: &str) -> bool {
+    text.split(['\n', '.', ';', '!', '?']).any(|clause| {
+        let clause = clause.trim();
+        let bounded = "no |not |does not|do not|never|without|unavailable|unsupported|deferred|future|conditional|requires|independent verification"
+            .split('|')
+            .any(|boundary| clause.contains(boundary));
+        let known = "engine support|adapter support|comparator behavior|output fidelity|pdf byte equality|visual equality|text equality|content erasure|candidate baseline availability|phase 1 complete"
+            .split('|')
+            .any(|claim| clause.contains(claim));
+        let affirmative = ["support", "supports", "supported", "available", "implemented", "complete"]
+            .iter()
+            .any(|word| standalone_token(clause, word));
+        let target = ["public capability", "redaction"]
+            .iter()
+            .any(|target| clause.contains(target));
+        let explicit_absence = target && standalone_token(clause, "absent") && !affirmative;
+        !(bounded || explicit_absence) && (known || affirmative && target)
+    })
+}
+
+fn standalone_token(clause: &str, token: &str) -> bool {
+    clause
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|word| word == token)
+}
+
+fn markdown_references(document: &str) -> impl Iterator<Item = &str> {
+    document
+        .split("](")
+        .skip(1)
+        .filter_map(|suffix| suffix.split_once(')').map(|(reference, _)| reference))
+        .filter_map(|reference| {
+            reference
+                .split_once('#')
+                .map_or(Some(reference), |(path, _)| Some(path))
+        })
+        .filter(|reference| !reference.is_empty())
+}
+
 fn validate_record(
     root: &Path,
     path: Option<&str>,
@@ -428,6 +536,29 @@ fn validate_record(
         Some(contents) if !contents.is_empty() && std::str::from_utf8(&contents).is_ok() => {}
         _ if path.is_none() => errors.push(missing),
         _ => errors.push(unsafe_record),
+    }
+}
+
+fn validate_authoring(root: &Path, path: &str, digest: &str, errors: &mut Vec<&'static str>) {
+    let digest_valid = digest.len() == 64
+        && digest.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+        });
+    if !digest_valid {
+        errors.push("source_authoring_digest_invalid");
+    }
+    match confined_read(root, path, MAX_SOURCE_BYTES) {
+        Ok(contents) if digest_valid => {
+            if digest != format!("{:x}", Sha256::digest(contents)) {
+                errors.push("source_authoring_digest_mismatch");
+            }
+        }
+        Ok(_) => {}
+        Err("source_path_unsafe") => errors.push("source_authoring_path_unsafe"),
+        Err("source_path_missing") => errors.push("source_authoring_path_missing"),
+        Err("source_path_nonregular") => errors.push("source_authoring_path_nonregular"),
+        Err("source_path_oversized") => errors.push("source_authoring_path_oversized"),
+        Err(_) => errors.push("source_authoring_path_unsafe"),
     }
 }
 

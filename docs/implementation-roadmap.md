@@ -29,6 +29,8 @@ Build a Rust-first local document and PDF tool whose engine choices, fidelity pr
 
 ## Phase 1: Evaluation Corpus and Reproducible Harness
 
+The current project-authored structural catalog and its provenance records are available in a clean checkout. It is structural-only and baseline-free: it declares inputs and expected page observations without executing PDFs, selecting an engine, or completing Phase 1.
+
 ### Corpus
 
 Create a versioned corpus manifest with fixture identifiers, source/license provenance, expected characteristics, sensitivity classification, and allowed distribution. Include representative and adversarial cases:
@@ -52,7 +54,7 @@ The harness must execute each candidate against the same named corpus revision a
 - Requested operation/options, declared capabilities, elapsed time, peak memory when measurable, exit status, diagnostics, output hashes, and failure classification.
 - Structural comparisons, visual render comparisons, semantic/text comparisons, and determinism checks appropriate to the operation.
 
-Run each determinism case repeatedly under the same pinned environment. Record PDF byte equality separately from visual or structural equality; no byte-determinism claim follows from a visually stable result.
+Run each determinism case repeatedly under the same pinned environment. Record byte-level PDF comparison separately from visual or structural comparison; no byte-determinism claim follows from a visually stable result.
 
 ### Governed receipt reproduction
 
