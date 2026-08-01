@@ -1,0 +1,55 @@
+{
+  "schema_version": "2.0",
+  "catalog_id": "docmorph-structural-pdf-corpus",
+  "sources": [
+    {
+      "id": "letter-source",
+      "path": "fixtures/pdf/structural/letter.pdf",
+      "sha256": "9eab2c3b1e87cef03728e456e7cb7bf857f3264612dd5373b4fe348ee419b782",
+      "authoring_path": "fixtures/pdf/structural/build-letter.py",
+      "authoring_sha256": "a33cce58348ca698598cf5beb853c0e0aef6664cc48f558d2921cea6d0c91659",
+      "provenance_path": "fixtures/pdf/structural/records/letter-provenance.txt",
+      "license_path": "fixtures/pdf/structural/records/letter-license.txt",
+      "distribution_path": "fixtures/pdf/structural/records/letter-distribution.txt",
+      "metadata_path": "fixtures/pdf/structural/records/letter-metadata.json",
+      "pages": [
+        { "id": "page-1", "index": 0, "geometry": [612, 792], "rotation_degrees": 0 }
+      ]
+    },
+    {
+      "id": "landscape-source",
+      "path": "fixtures/pdf/structural/landscape-rotated.pdf",
+      "sha256": "da8f754e4dce79f6a3e88726feea57f97240faf21c643afa8c772ec1b1c26d8c",
+      "authoring_path": "fixtures/pdf/structural/build-landscape-rotated.py",
+      "authoring_sha256": "f37e60cd9f994d814ebf421d5b9e255da07f6b9541fd3f0f21cf5e62d4efc7b2",
+      "provenance_path": "fixtures/pdf/structural/records/landscape-provenance.txt",
+      "license_path": "fixtures/pdf/structural/records/landscape-license.txt",
+      "distribution_path": "fixtures/pdf/structural/records/landscape-distribution.txt",
+      "metadata_path": "fixtures/pdf/structural/records/landscape-metadata.json",
+      "pages": [
+        { "id": "page-2", "index": 0, "geometry": [842, 595], "rotation_degrees": 90 }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "merge-pages", "output": "merged-pages",
+      "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }],
+      "operation": { "kind": "merge", "inputs": [[{ "source_id": "letter-source", "page_id": "page-1" }], [{ "source_id": "landscape-source", "page_id": "page-2" }]], "observation": { "page_count": 2, "pages": [{ "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 0 }, { "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }] } }
+    },
+    {
+      "id": "split-pages", "output": "split-pages",
+      "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }],
+      "operation": { "kind": "split", "selection": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "partitions": [{ "name": "first", "pages": [{ "source_id": "letter-source", "page_id": "page-1" }], "observation": { "page_count": 1, "pages": [{ "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 0 }] } }, { "name": "second", "pages": [{ "source_id": "landscape-source", "page_id": "page-2" }], "observation": { "page_count": 1, "pages": [{ "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }] } }] }
+    },
+    {
+      "id": "rotate-pages", "output": "rotated-pages", "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "operation": { "kind": "rotate", "selection": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "rotation_degrees": 270, "observation": { "page_count": 2, "pages": [{ "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 270 }, { "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 0 }] } }
+    },
+    {
+      "id": "reorder-pages", "output": "reordered-pages", "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "operation": { "kind": "reorder", "selection": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "permutation": [{ "source_id": "landscape-source", "page_id": "page-2" }, { "source_id": "letter-source", "page_id": "page-1" }], "observation": { "page_count": 2, "pages": [{ "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }, { "origin": { "source_id": "letter-source", "page_id": "page-1" }, "geometry": [612, 792], "effective_rotation_degrees": 0 }] } }
+    },
+    {
+      "id": "delete-selected-pages", "output": "remaining-pages", "references": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "operation": { "kind": "delete_selected_pages", "selection": [{ "source_id": "letter-source", "page_id": "page-1" }, { "source_id": "landscape-source", "page_id": "page-2" }], "removals": [{ "source_id": "letter-source", "page_id": "page-1" }], "observation": { "page_count": 1, "pages": [{ "origin": { "source_id": "landscape-source", "page_id": "page-2" }, "geometry": [842, 595], "effective_rotation_degrees": 90 }] } }
+    }
+  ]
+}
