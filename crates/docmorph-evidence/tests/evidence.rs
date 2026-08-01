@@ -118,6 +118,7 @@ fn retained_graph() -> TempRoot {
         "fixtures/corpus-manifest.json",
         "fixtures/evidence-success-manifest.json",
         "fixtures/evidence-policy-failure-manifest.json",
+        "fixtures/named-runs/synthetic-smoke.json",
         "fixtures/mock/success-input.txt",
         "fixtures/mock/policy-failure-input.txt",
         "evidence/success/receipt.json",
@@ -503,17 +504,114 @@ fn named_mode_validates_its_default_definition_before_creating_a_run_root() {
 }
 
 #[test]
-fn valid_named_mode_reports_execution_not_implemented_without_creating_run_root() {
+fn named_preflight_rejects_operation_manifest_substitution_before_writes() {
+    let root = TempRoot::new();
+    let valid =
+        fs::read_to_string(repository_root().join("fixtures/named-runs/synthetic-smoke.json"))
+            .unwrap();
+    for (name, definition) in [
+        (
+            "duplicate",
+            valid.replace(
+                "evidence-policy-failure-manifest",
+                "evidence-success-manifest",
+            ),
+        ),
+        (
+            "substitute",
+            valid.replace("evidence-success-manifest.json", "other-manifest.json"),
+        ),
+    ] {
+        let run_root = root.0.join(format!("named-run-{name}"));
+        let definition_path = root.0.join(format!("definition-{name}.json"));
+        fs::write(&definition_path, definition).unwrap();
+        let mut arguments = named_arguments(&repository_root(), &run_root);
+        arguments.extend(["--run-definition".into(), definition_path]);
+        let output = run_arguments(&arguments);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "docmorph-evidence: named_definition_invalid:named_definition_member_operation_manifest_invalid\n"
+        );
+        assert!(!run_root.exists());
+    }
+}
+
+#[test]
+fn named_preflight_rejects_existing_root_without_changing_its_bytes() {
     let root = TempRoot::new();
     let run_root = root.0.join("named-run");
+    fs::create_dir(&run_root).unwrap();
+    fs::write(run_root.join("sentinel.txt"), b"unchanged").unwrap();
+    let before = fs::read(run_root.join("sentinel.txt")).unwrap();
     let output = run_arguments(&named_arguments(&repository_root(), &run_root));
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "docmorph-evidence: named_run_execution_not_implemented\n"
+        "docmorph-evidence: named_run_root_already_exists\n"
     );
-    assert!(!run_root.exists());
+    assert_eq!(fs::read(run_root.join("sentinel.txt")).unwrap(), before);
+}
+
+#[test]
+fn named_execution_creates_isolated_ordered_case_evidence() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&repository_root(), &run_root));
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert!(
+        run_root
+            .join("cases/00-policy-failure/receipt.json")
+            .is_file()
+    );
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    assert!(
+        !run_root
+            .join("cases/00-policy-failure/artifacts/success-output.mock")
+            .exists()
+    );
+    assert_eq!(
+        fs::read(run_root.join("cases/01-success/artifacts/success-output.mock")).unwrap(),
+        fs::read(repository_root().join("fixtures/mock/success-input.txt")).unwrap()
+    );
+}
+
+#[test]
+fn named_execution_continues_after_a_case_execution_failure() {
+    let root = retained_graph();
+    let run_root = root.0.join("named-run");
+    let manifest = root
+        .0
+        .join("fixtures/evidence-policy-failure-manifest.json");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("\"expected_outcome\": \"failure\",\n      \"expected_diagnostic_code\": \"input_outside_allowed_root\"", "\"expected_outcome\": \"success\""),
+    )
+    .unwrap();
+    let catalog_path = root.0.join("fixtures/corpus-manifest.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+    for fixture in catalog["fixtures"].as_array_mut().unwrap() {
+        fixture.as_object_mut().unwrap().remove("baseline");
+    }
+    fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+
+    let mut arguments = named_arguments(&root.0, &run_root);
+    arguments.extend(["--catalog".into(), catalog_path]);
+    let output = run_arguments(&arguments);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("named_run_case_failed:policy-failure")
+    );
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
 }
 
 #[test]

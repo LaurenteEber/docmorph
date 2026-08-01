@@ -143,12 +143,56 @@ struct NamedArguments {
     catalog: PathBuf,
 }
 
+struct RunPlan {
+    run_root: PathBuf,
+    repository_root: PathBuf,
+    catalog: PathBuf,
+    cases: Vec<catalog::NamedRunCase>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContractState {
+    Satisfied,
+    Violated,
+    ExecutionFailed,
+    EvidenceRetentionFailed,
+}
+
+#[allow(dead_code)] // Baseline comparison states are populated by PR3.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverallState {
+    CompleteMatch,
+    BaselineMismatch,
+    IncomparableEnvironment,
+    CaseContractFailure,
+    CaseExecutionFailure,
+    CaseEvidenceRetentionFailure,
+}
+
+enum CaseFailure {
+    Contract(String),
+    Execution(String),
+    Directory(String),
+    Retention(String),
+}
+
+#[allow(dead_code)] // PR3 serializes these in the aggregate report.
+struct NamedOutcome {
+    case_states: Vec<ContractState>,
+    overall_state: OverallState,
+    errors: Vec<String>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("docmorph-evidence: {error}");
-            ExitCode::from(2)
+            ExitCode::from(if error.starts_with("named_run_case_failed:") {
+                3
+            } else {
+                2
+            })
         }
     }
 }
@@ -161,7 +205,8 @@ fn run() -> Result<(), String> {
         .any(|argument| argument == "--named-run")
     {
         let arguments = parse_named_arguments(command.iter().skip(1).cloned())?;
-        return validate_named_route(&arguments);
+        let plan = prepare_named(&arguments)?;
+        return execute_named(plan);
     }
     let arguments = parse_arguments(command.iter().skip(1).cloned())?;
     legacy::execute(command, arguments)
@@ -256,7 +301,7 @@ fn execute_legacy(command: Vec<String>, arguments: Arguments) -> Result<(), Stri
     .map_err(|error| format!("receipt cannot be retained: {error}"))
 }
 
-fn validate_named_route(arguments: &NamedArguments) -> Result<(), String> {
+fn prepare_named(arguments: &NamedArguments) -> Result<RunPlan, String> {
     if arguments.run_name != "synthetic-smoke" {
         return Err(format!("named_run_unknown:{}", arguments.run_name));
     }
@@ -266,10 +311,114 @@ fn validate_named_route(arguments: &NamedArguments) -> Result<(), String> {
         .map_err(|errors| format!("catalog_invalid:{}", errors.codes()[0]))?;
     let definition = fs::read(&arguments.run_definition)
         .map_err(|_| "named_definition_unreadable".to_owned())?;
-    catalog::validate_named_definition_bytes(&definition, &catalog)
+    let cases = catalog::validate_named_definition_bytes(&definition, &catalog)
         .map_err(|errors| format!("named_definition_invalid:{}", errors.codes()[0]))?;
-    let _ = &arguments.run_root;
-    Err("named_run_execution_not_implemented".to_owned())
+    for case in &cases {
+        let manifest_bytes = fs::read(arguments.repository_root.join(&case.operation_manifest))
+            .map_err(|_| format!("named_manifest_unreadable:{}", case.id))?;
+        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| format!("named_manifest_invalid:{}", case.id))?;
+        validate_manifest(&manifest).map_err(|_| format!("named_manifest_invalid:{}", case.id))?;
+    }
+    if arguments.run_root.exists() {
+        return Err("named_run_root_already_exists".to_owned());
+    }
+    Ok(RunPlan {
+        run_root: arguments.run_root.clone(),
+        repository_root: arguments.repository_root.clone(),
+        catalog: arguments.catalog.clone(),
+        cases,
+    })
+}
+
+fn execute_named(plan: RunPlan) -> Result<(), String> {
+    fs::create_dir(&plan.run_root).map_err(|_| "named_run_root_create_failed".to_owned())?;
+    let cases_root = plan.run_root.join("cases");
+    fs::create_dir(&cases_root).map_err(|_| "named_cases_root_create_failed".to_owned())?;
+    let case_ids = plan
+        .cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    let outcome = run_case_state_machine(&case_ids, |case_id| {
+        let case = &plan.cases[index];
+        let receipt_dir = cases_root.join(format!("{index:02}-{}", case.id));
+        index += 1;
+        let result = fs::create_dir(&receipt_dir)
+            .map_err(|_| CaseFailure::Directory("case_directory_create_failed".into()))
+            .and_then(|_| {
+                execute_legacy(
+                    vec!["docmorph-evidence".into()],
+                    Arguments {
+                        manifest: plan.repository_root.join(&case.operation_manifest),
+                        receipt_dir,
+                        catalog: plan.catalog.clone(),
+                        repository_root: plan.repository_root.clone(),
+                    },
+                )
+                .map_err(classify_case_error)
+            });
+        debug_assert_eq!(case.id, case_id);
+        result
+    });
+    outcome.errors.first().map_or(Ok(()), |error| {
+        Err(format!("named_run_case_failed:{error}"))
+    })
+}
+
+fn classify_case_error(error: String) -> CaseFailure {
+    if error.starts_with("fixture `") {
+        CaseFailure::Contract(error)
+    } else if error.starts_with("receipt artifacts cannot") || error.starts_with("receipt cannot") {
+        CaseFailure::Retention(error)
+    } else {
+        CaseFailure::Execution(error)
+    }
+}
+
+fn run_case_state_machine(
+    case_ids: &[&str],
+    mut run_case: impl FnMut(&str) -> Result<(), CaseFailure>,
+) -> NamedOutcome {
+    let mut case_states = Vec::with_capacity(case_ids.len());
+    let mut errors = Vec::new();
+    for id in case_ids {
+        match run_case(id) {
+            Ok(()) => case_states.push(ContractState::Satisfied),
+            Err(CaseFailure::Contract(error)) => {
+                case_states.push(ContractState::Violated);
+                errors.push(format!("{id}:{error}"));
+            }
+            Err(CaseFailure::Execution(error)) => {
+                case_states.push(ContractState::ExecutionFailed);
+                errors.push(format!("{id}:{error}"));
+            }
+            Err(CaseFailure::Directory(error)) => {
+                case_states.push(ContractState::EvidenceRetentionFailed);
+                errors.push(format!("{id}:{error}"));
+            }
+            Err(CaseFailure::Retention(error)) => {
+                case_states.push(ContractState::EvidenceRetentionFailed);
+                errors.push(format!("{id}:{error}"));
+            }
+        }
+    }
+    let overall_state = if case_states.contains(&ContractState::EvidenceRetentionFailed) {
+        OverallState::CaseEvidenceRetentionFailure
+    } else if case_states.contains(&ContractState::ExecutionFailed) {
+        OverallState::CaseExecutionFailure
+    } else if case_states.contains(&ContractState::Violated) {
+        OverallState::CaseContractFailure
+    } else {
+        // Baseline comparison is intentionally deferred to PR3.
+        OverallState::CompleteMatch
+    };
+    NamedOutcome {
+        case_states,
+        overall_state,
+        errors,
+    }
 }
 
 fn run_fixture(
@@ -453,4 +602,53 @@ fn parse_named_arguments(
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_machine_continues_and_applies_closed_precedence() {
+        let mut attempted = Vec::new();
+        let outcome = run_case_state_machine(&["policy-failure", "success"], |id| {
+            attempted.push(id.to_owned());
+            if id == "policy-failure" {
+                Err(CaseFailure::Contract("declared_outcome_mismatch".into()))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(attempted, ["policy-failure", "success"]);
+        assert_eq!(
+            outcome.case_states,
+            [ContractState::Violated, ContractState::Satisfied]
+        );
+        assert_eq!(outcome.overall_state, OverallState::CaseContractFailure);
+        assert_eq!(outcome.errors, ["policy-failure:declared_outcome_mismatch"]);
+
+        let precedence =
+            run_case_state_machine(&["contract", "execution", "directory", "retention"], |id| {
+                Err(match id {
+                    "contract" => CaseFailure::Contract("contract".into()),
+                    "execution" => CaseFailure::Execution("execution".into()),
+                    "directory" => CaseFailure::Directory("case_directory_create_failed".into()),
+                    _ => CaseFailure::Retention("receipt_retention_failed".into()),
+                })
+            });
+        assert_eq!(
+            precedence.overall_state,
+            OverallState::CaseEvidenceRetentionFailure
+        );
+        assert_eq!(
+            precedence.errors,
+            [
+                "contract:contract",
+                "execution:execution",
+                "directory:case_directory_create_failed",
+                "retention:receipt_retention_failed"
+            ]
+        );
+    }
 }
