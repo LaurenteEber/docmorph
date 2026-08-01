@@ -2,6 +2,10 @@
 
 This directory retains deterministic receipts for the Phase 0 mock evidence scenarios. Review `success/receipt.json` first to confirm a published artifact, then review `policy-failure/receipt.json` to confirm that policy rejection records a diagnostic without an artifact.
 
+## Structural corpus boundary
+
+The separate structural catalog documents a project-authored PDF corpus whose files and provenance records are available in a clean checkout. Its structural-only declarations validate page origin, order, count, geometry, and rotation; they are baseline-free and do not execute PDFs or establish a supported capability.
+
 ## Governed reproduction
 
 Run the workflow from a clean checkout. It requires the operation manifest, a new receipt directory for each run, the governed catalog, and the repository root.

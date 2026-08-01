@@ -24,6 +24,16 @@ fn raw_sha256(path: impl AsRef<Path>) -> String {
     )
 }
 
+const AUTHORING_SHA256: &str = "796e917c9ac859dd6aff7b9a1bcf7e19ea361a1d5702139f18f094f167a6c8b3";
+
+fn with_inline_authoring(document: &str) -> String {
+    document.replacen(
+        "\"pages\":",
+        &format!("\"authoring_path\":\"fixtures/authoring.txt\",\"authoring_sha256\":\"{AUTHORING_SHA256}\",\"pages\":"),
+        2,
+    )
+}
+
 #[test]
 fn retained_mock_artifacts_remain_byte_and_semantically_pinned() {
     let root = repository_root();
@@ -99,11 +109,11 @@ fn retained_mock_artifacts_remain_byte_and_semantically_pinned() {
 }
 
 fn structural_catalog_document() -> String {
-    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
+    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","authoring_path":"fixtures/authoring.txt","authoring_sha256":"796e917c9ac859dd6aff7b9a1bcf7e19ea361a1d5702139f18f094f167a6c8b3","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
 }
 
 fn source_catalog_document() -> String {
-    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","path":"fixtures/source.pdf","sha256":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9","provenance_path":"records/provenance.txt","license_path":"records/license.txt","distribution_path":"records/distribution.txt","metadata_path":"records/metadata.json","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
+    r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"source","path":"fixtures/source.pdf","sha256":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9","authoring_path":"fixtures/authoring.txt","authoring_sha256":"796e917c9ac859dd6aff7b9a1bcf7e19ea361a1d5702139f18f094f167a6c8b3","provenance_path":"records/provenance.txt","license_path":"records/license.txt","distribution_path":"records/distribution.txt","metadata_path":"records/metadata.json","pages":[{"id":"page"}]}],"cases":[{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}]}"#.into()
 }
 
 #[test]
@@ -114,6 +124,7 @@ fn structural_source_provenance() {
     fs::create_dir_all(root.join("fixtures/directory")).unwrap();
     fs::create_dir_all(root.join("records")).unwrap();
     fs::write(root.join("fixtures/source.pdf"), b"hello world").unwrap();
+    fs::write(root.join("fixtures/authoring.txt"), b"authoring fixture").unwrap();
     fs::write(root.join("fixtures/large.pdf"), vec![0; 1_048_577]).unwrap();
     for path in [
         "provenance.txt",
@@ -174,6 +185,18 @@ fn structural_source_provenance() {
                 .codes(),
             vec![expected]
         );
+    }
+    for (actual, expected) in [
+        (document.replace("\"authoring_path\":\"fixtures/authoring.txt\",", ""), "structural_catalog_schema_invalid"),
+        (document.replace("\"authoring_sha256\":\"796e917c9ac859dd6aff7b9a1bcf7e19ea361a1d5702139f18f094f167a6c8b3\",", ""), "structural_catalog_schema_invalid"),
+        (document.replace("fixtures/authoring.txt", ""), "source_authoring_path_unsafe"),
+        (document.replace("fixtures/authoring.txt", "../authoring.txt"), "source_authoring_path_unsafe"),
+        (document.replace("fixtures/authoring.txt", "fixtures/missing-authoring.txt"), "source_authoring_path_missing"),
+        (document.replace("fixtures/authoring.txt", "fixtures/directory"), "source_authoring_path_nonregular"),
+        (document.replace(AUTHORING_SHA256, "not-a-sha256"), "source_authoring_digest_invalid"),
+        (document.replace(AUTHORING_SHA256, "0000000000000000000000000000000000000000000000000000000000000000"), "source_authoring_digest_mismatch"),
+    ] {
+        assert_eq!(structural_catalog::validate_structural_catalog_sources(actual.as_bytes(), &root).unwrap_err().codes(), vec![expected]);
     }
     let mut duplicate: serde_json::Value = serde_json::from_str(&document).unwrap();
     let mut source = duplicate["sources"][0].clone();
@@ -253,7 +276,7 @@ fn structural_envelope_core() {
     assert_eq!(first.0, "structural-catalog");
     assert_eq!(first.1, second.1);
 
-    let source = r#"{"id":"source","pages":[{"id":"page"}]}"#;
+    let source = r#"{"id":"source","authoring_path":"fixtures/authoring.txt","authoring_sha256":"796e917c9ac859dd6aff7b9a1bcf7e19ea361a1d5702139f18f094f167a6c8b3","pages":[{"id":"page"}]}"#;
     let case =
         r#"{"id":"case","output":"output","references":[{"source_id":"source","page_id":"page"}]}"#;
     for (actual, expected) in [
@@ -297,6 +320,7 @@ fn structural_envelope_core() {
 #[test]
 fn structural_merge_split() {
     let document = r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"letter-source","pages":[{"id":"page-1","geometry":[612,792],"rotation_degrees":0}]},{"id":"landscape-source","pages":[{"id":"page-2","geometry":[842,595],"rotation_degrees":90}]}],"cases":[{"id":"merge","output":"merged","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"merge","inputs":[[{"source_id":"letter-source","page_id":"page-1"}],[{"source_id":"landscape-source","page_id":"page-2"}]],"observation":{"page_count":2,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0},{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]} }},{"id":"split","output":"split","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"split","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"partitions":[{"name":"first","pages":[{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0}]}},{"name":"second","pages":[{"source_id":"landscape-source","page_id":"page-2"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]}}]}}]}"#;
+    let document = with_inline_authoring(document);
     assert!(structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).is_ok());
     for (actual, expected) in [
         (document.replacen("\"page_count\":2", "\"baseline\":\"candidate.pdf\",\"page_count\":2", 1), "observation_baseline_forbidden"),
@@ -321,6 +345,7 @@ fn structural_merge_split() {
 #[test]
 fn structural_rotate_reorder_delete() {
     let document = r#"{"schema_version":"2.0","catalog_id":"structural-catalog","sources":[{"id":"letter-source","pages":[{"id":"page-1","geometry":[612,792],"rotation_degrees":0}]},{"id":"landscape-source","pages":[{"id":"page-2","geometry":[842,595],"rotation_degrees":90}]}],"cases":[{"id":"rotate","output":"rotated","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"rotate","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"rotation_degrees":270,"observation":{"page_count":2,"pages":[{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":270},{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":0}]} }},{"id":"reorder","output":"reordered","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"reorder","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"permutation":[{"source_id":"landscape-source","page_id":"page-2"},{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":2,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90},{"origin":{"source_id":"letter-source","page_id":"page-1"},"geometry":[612,792],"effective_rotation_degrees":0}]}}},{"id":"delete","output":"deleted","references":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"operation":{"kind":"delete_selected_pages","selection":[{"source_id":"letter-source","page_id":"page-1"},{"source_id":"landscape-source","page_id":"page-2"}],"removals":[{"source_id":"letter-source","page_id":"page-1"}],"observation":{"page_count":1,"pages":[{"origin":{"source_id":"landscape-source","page_id":"page-2"},"geometry":[842,595],"effective_rotation_degrees":90}]}}}]}"#;
+    let document = with_inline_authoring(document);
     assert!(structural_catalog::validate_structural_catalog_bytes(document.as_bytes()).is_ok());
     assert_eq!(
         structural_catalog::validate_structural_catalog_bytes(
@@ -353,4 +378,109 @@ fn structural_rotate_reorder_delete() {
     ] {
         assert_eq!(structural_catalog::validate_structural_catalog_bytes(actual.as_bytes()).unwrap_err().codes(), expected);
     }
+}
+
+#[test]
+fn structural_truthfulness() {
+    let root = repository_root();
+    let documents = ["evidence/README.md", "docs/implementation-roadmap.md"];
+    assert!(structural_catalog::validate_structural_documentation(&root, &documents).is_ok());
+
+    let temporary =
+        std::env::temp_dir().join(format!("docmorph-truthfulness-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temporary);
+    fs::create_dir_all(temporary.join("evidence")).unwrap();
+    fs::create_dir_all(temporary.join("docs")).unwrap();
+    let truthful = "project-authored clean checkout structural-only baseline-free";
+    for document in documents {
+        fs::write(temporary.join(document), truthful).unwrap();
+    }
+    assert!(structural_catalog::validate_structural_documentation(&temporary, &documents).is_ok());
+    for claim in [
+        "engine support",
+        "adapter support",
+        "comparator behavior",
+        "output fidelity",
+        "PDF byte equality",
+        "visual equality",
+        "text equality",
+        "content erasure",
+        "supports redaction",
+        "candidate baseline availability",
+        "Phase 1 complete",
+        "public capability is available",
+        "redaction is supported",
+        "public capability is absent and implemented",
+        "redaction is absent and supported",
+    ] {
+        fs::write(
+            temporary.join("evidence/README.md"),
+            format!("{truthful} {claim}"),
+        )
+        .unwrap();
+        assert_eq!(
+            structural_catalog::validate_structural_documentation(&temporary, &documents)
+                .unwrap_err()
+                .codes(),
+            vec!["documentation_claim_unsupported"]
+        );
+    }
+    for boundary in [
+        "public capability is unavailable",
+        "redaction is unsupported",
+        "redaction is absent",
+        "public capability is absent",
+        "public capability is deferred to future work",
+        "redaction remains conditional on independent verification",
+    ] {
+        fs::write(
+            temporary.join("evidence/README.md"),
+            format!("{truthful} {boundary}"),
+        )
+        .unwrap();
+        assert!(
+            structural_catalog::validate_structural_documentation(&temporary, &documents).is_ok()
+        );
+    }
+    fs::write(temporary.join("evidence/README.md"), truthful).unwrap();
+    fs::write(
+        temporary.join("evidence/README.md"),
+        format!("{truthful}\n[stale record](missing-record.md)"),
+    )
+    .unwrap();
+    assert_eq!(
+        structural_catalog::validate_structural_documentation(&temporary, &documents)
+            .unwrap_err()
+            .codes(),
+        vec!["documentation_reference_missing"]
+    );
+    fs::write(
+        temporary.join("evidence/README.md"),
+        format!("{truthful}\nengine support"),
+    )
+    .unwrap();
+    assert_eq!(
+        structural_catalog::validate_structural_documentation(&temporary, &documents)
+            .unwrap_err()
+            .codes(),
+        vec!["documentation_claim_unsupported"]
+    );
+    fs::write(temporary.join("evidence/README.md"), truthful).unwrap();
+    fs::remove_file(temporary.join("docs/implementation-roadmap.md")).unwrap();
+    assert_eq!(
+        structural_catalog::validate_structural_documentation(&temporary, &documents)
+            .unwrap_err()
+            .codes(),
+        vec!["documentation_reference_missing"]
+    );
+    assert_eq!(
+        structural_catalog::validate_structural_documentation(
+            &temporary,
+            &["evidence/README.md", "../README.md"],
+        )
+        .unwrap_err()
+        .codes(),
+        vec!["documentation_reference_unsafe"]
+    );
+    let _ = fs::remove_dir_all(temporary);
 }
