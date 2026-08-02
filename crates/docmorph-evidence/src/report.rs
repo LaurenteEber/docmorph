@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Environment {
     toolchain: Toolchain,
     build_compiler: BuildCompiler,
@@ -9,12 +9,12 @@ pub struct Environment {
     adapter: Adapter,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Toolchain {
     rust_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct BuildCompiler {
     release: String,
     commit_hash: String,
@@ -22,14 +22,14 @@ struct BuildCompiler {
     llvm_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Platform {
     family: String,
     os: String,
     arch: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Adapter {
     name: String,
     version: String,
@@ -54,7 +54,7 @@ impl Environment {
             },
             adapter: Adapter {
                 name: "mock".into(),
-                version: "1.0".into(),
+                version: "0.1.0".into(),
             },
         }
     }
@@ -63,6 +63,17 @@ impl Environment {
         let mut different = environment.clone();
         different.adapter.version.push_str("-different");
         different
+    }
+
+    #[allow(dead_code)]
+    pub fn from_receipt(receipt: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(serde_json::json!({
+            "toolchain": receipt.get("toolchain")?,
+            "build_compiler": receipt.get("build_compiler")?,
+            "platform": receipt.get("platform")?,
+            "adapter": receipt.get("adapter")?,
+        }))
+        .ok()
     }
 }
 
