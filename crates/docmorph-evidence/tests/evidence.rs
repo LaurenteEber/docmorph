@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "../src/catalog.rs"]
 mod catalog;
+#[path = "../src/report.rs"]
+mod report;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -93,6 +95,18 @@ fn run_arguments(arguments: &[PathBuf]) -> Output {
         .expect("evidence binary spawns")
 }
 
+fn run_named_fault(arguments: &[PathBuf], fault: &str) -> Output {
+    let arguments = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    Command::new(env!("CARGO_BIN_EXE_docmorph-evidence"))
+        .args(arguments)
+        .env("DOCMORPH_NAMED_FAULT", fault)
+        .output()
+        .expect("evidence binary spawns")
+}
+
 fn named_arguments(root: &std::path::Path, run_root: &std::path::Path) -> Vec<PathBuf> {
     vec![
         "--named-run".into(),
@@ -129,6 +143,73 @@ fn retained_graph() -> TempRoot {
         fs::copy(repository_root().join(path), destination).unwrap();
     }
     root
+}
+
+fn comparable_root() -> TempRoot {
+    let root = retained_graph();
+    rebind_retained_evidence(&root.0);
+    root
+}
+
+// `semantic_sha256` covers build compiler provenance, so retained evidence
+// recorded by another rustc is incomparable and every named case resolves to
+// `named_run_incomparable_environment`. Regenerating it here keeps baseline
+// comparison meaningful on whichever toolchain runs the suite.
+fn rebind_retained_evidence(root: &std::path::Path) {
+    let catalog_path = root.join("fixtures/corpus-manifest.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+    let fixtures = catalog["fixtures"].as_array().unwrap().clone();
+    // Every governed run revalidates the catalog against the retained receipts,
+    // so regenerate them all against the pristine catalog before writing any of
+    // them back; interleaving leaves the pair inconsistent mid-loop.
+    let regenerated = fixtures
+        .iter()
+        .enumerate()
+        .filter_map(|(index, fixture)| {
+            let baseline = fixture["baseline"].as_object()?;
+            let manifest = root.join(baseline["operation_manifest"].as_str().unwrap());
+            let retained = root.join(baseline["retained_receipt"].as_str().unwrap());
+            let receipt_dir = root.join("rebind").join(fixture["id"].as_str().unwrap());
+            fs::create_dir_all(&receipt_dir).unwrap();
+            let output = run_rooted(root, &manifest, &receipt_dir, &catalog_path);
+            let receipt =
+                fs::read_to_string(receipt_dir.join("receipt.json")).unwrap_or_else(|error| {
+                    panic!(
+                        "retained evidence regenerates: {error}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                });
+            Some((index, retained, receipt))
+        })
+        .collect::<Vec<_>>();
+    for (index, retained, receipt) in regenerated {
+        catalog["fixtures"][index]["baseline"]["semantic_sha256"] =
+            field_value(&receipt, "semantic_sha256").into();
+        fs::write(retained, receipt).unwrap();
+    }
+    fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+}
+
+fn run_rooted(
+    root: &std::path::Path,
+    manifest_path: &std::path::Path,
+    receipt_dir: &std::path::Path,
+    catalog_path: &std::path::Path,
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_docmorph-evidence"))
+        .args([
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--receipt-dir",
+            receipt_dir.to_str().unwrap(),
+            "--catalog",
+            catalog_path.to_str().unwrap(),
+            "--repository-root",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .expect("evidence binary spawns")
 }
 
 fn bind_catalog_receipts(root: &std::path::Path, document: &str) {
@@ -556,9 +637,9 @@ fn named_preflight_rejects_existing_root_without_changing_its_bytes() {
 
 #[test]
 fn named_execution_creates_isolated_ordered_case_evidence() {
-    let root = TempRoot::new();
+    let root = comparable_root();
     let run_root = root.0.join("named-run");
-    let output = run_arguments(&named_arguments(&repository_root(), &run_root));
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stderr.is_empty());
@@ -580,7 +661,93 @@ fn named_execution_creates_isolated_ordered_case_evidence() {
 }
 
 #[test]
-fn named_execution_continues_after_a_case_execution_failure() {
+fn named_persistence_complete_publication() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(run_root.join("report.json")).expect("complete report is published"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["overall_state"], "complete_match");
+    assert_eq!(report["cases"][0]["id"], "policy-failure");
+    assert_eq!(report["cases"][1]["id"], "success");
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_temp_create_failure_is_truthful_and_clean() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&repository_root(), &run_root),
+        "temp-create",
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "docmorph-evidence: named_run_report_persistence_failed:report_temp_create_failed\n"
+    );
+    assert!(!run_root.join("report.json").exists());
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_temp_write_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("temp-write", "report_temp_write_failed");
+}
+
+#[test]
+fn named_persistence_temp_flush_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("temp-flush", "report_temp_flush_failed");
+}
+
+#[test]
+fn named_persistence_rename_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("rename", "report_rename_failed");
+}
+
+fn assert_named_persistence_fault(fault: &str, code: &str) {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(&named_arguments(&repository_root(), &run_root), fault);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("docmorph-evidence: named_run_report_persistence_failed:{code}\n")
+    );
+    assert!(!run_root.join("report.json").exists());
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_retention_failure_keeps_later_success_and_report() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&root.0, &run_root),
+        "retain:policy-failure",
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["overall_state"], "case_evidence_retention_failure");
+    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["cases"][0]["contract_state"],
+        "evidence_retention_failed"
+    );
+    assert_eq!(report["cases"][1]["contract_state"], "satisfied");
+}
+
+#[test]
+fn named_execution_failure_uses_catalog_digest_without_rereading_rejected_input() {
     let root = retained_graph();
     let run_root = root.0.join("named-run");
     let manifest = root
@@ -590,7 +757,8 @@ fn named_execution_continues_after_a_case_execution_failure() {
         &manifest,
         fs::read_to_string(&manifest)
             .unwrap()
-            .replace("\"expected_outcome\": \"failure\",\n      \"expected_diagnostic_code\": \"input_outside_allowed_root\"", "\"expected_outcome\": \"success\""),
+            .replace("\"expected_outcome\": \"failure\",\n      \"expected_diagnostic_code\": \"input_outside_allowed_root\"", "\"expected_outcome\": \"success\"")
+            .replace("mock/policy-failure-input.txt", "/dev/null"),
     )
     .unwrap();
     let catalog_path = root.0.join("fixtures/corpus-manifest.json");
@@ -612,6 +780,225 @@ fn named_execution_continues_after_a_case_execution_failure() {
             .contains("named_run_case_failed:policy-failure")
     );
     assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["cases"][0]["declared_input_sha256"],
+        catalog["fixtures"][0]["sha256"]
+    );
+}
+
+fn named_report(root: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn named_membership_exclusion() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+    assert_eq!(output.status.code(), Some(0));
+    let report = named_report(&run_root);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(report["cases"][0]["id"], "policy-failure");
+    assert_eq!(report["cases"][1]["id"], "success");
+    assert_eq!(report["cases"][1]["baseline_state"], "match");
+    assert!(!report.to_string().contains("pdf"));
+}
+
+#[test]
+fn named_determinism() {
+    let root = comparable_root();
+    let first_root = root.0.join("first");
+    let second_root = root.0.join("second");
+    assert_eq!(
+        run_arguments(&named_arguments(&root.0, &first_root))
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_arguments(&named_arguments(&root.0, &second_root))
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        named_report(&first_root)["semantic_sha256"],
+        named_report(&second_root)["semantic_sha256"]
+    );
+}
+
+#[test]
+fn named_mismatch_exit() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let semantic_sha256 = "0".repeat(64);
+    let catalog_path = root.0.join("fixtures/corpus-manifest.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+    catalog["fixtures"][1]["baseline"]["semantic_sha256"] = semantic_sha256.clone().into();
+    fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let receipt_path = root.0.join("evidence/success/receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["semantic_sha256"] = semantic_sha256.into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "baseline_mismatch"
+    );
+}
+
+#[test]
+fn named_incomparable_exit() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let receipt_path = root.0.join("evidence/success/receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["platform"]["arch"] = "incomparable".into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "incomparable_environment"
+    );
+}
+
+#[test]
+fn named_continuation() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&root.0, &run_root),
+        "retain:policy-failure",
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "case_evidence_retention_failure"
+    );
+}
+
+#[test]
+fn legacy_manifest_compatibility() {
+    let root = TempRoot::new();
+    let receipt_dir = root.0.join("legacy");
+    let output = run(&manifest(), &receipt_dir);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(receipt_dir.join("receipt.json").is_file());
+    assert!(!receipt_dir.join("report.json").exists());
+}
+
+fn named_case(id: &str) -> report::CaseRecord {
+    report::CaseRecord {
+        id: id.into(),
+        operation_manifest_sha256: "a".repeat(64),
+        declared_outcome: report::Outcome::Success,
+        observed_outcome: report::Outcome::Success,
+        expected_primary_diagnostic_code: None,
+        observed_primary_diagnostic_code: None,
+        declared_input_sha256: Some("b".repeat(64)),
+        artifact_sha256: Some("c".repeat(64)),
+        artifact_byte_len: Some(37),
+        baseline_receipt_semantic_sha256: Some("d".repeat(64)),
+        observed_receipt_semantic_sha256: Some("d".repeat(64)),
+        contract_state: report::ContractState::Satisfied,
+        baseline_state: report::BaselineState::NotCompared,
+        execution_error_code: None,
+        retention_error_code: None,
+    }
+}
+
+#[test]
+fn named_report_projection_is_compact_ordered_and_self_excluding() {
+    let report = report::Report::new(
+        "e".repeat(64),
+        "f".repeat(64),
+        report::Environment::current(),
+        vec![named_case("policy-failure"), named_case("success")],
+    );
+
+    let bytes = report.canonical_bytes().unwrap();
+    let json = String::from_utf8(bytes.clone()).unwrap();
+    assert!(!json.contains("\"semantic_sha256\":"));
+    assert!(!json.contains([' ', '\n']));
+    assert!(json.contains("\"declared_input_sha256\":\"bbbb"));
+    assert!(json.contains("\"expected_primary_diagnostic_code\":null"));
+    assert!(json.find("policy-failure").unwrap() < json.find("success").unwrap());
+    assert_eq!(
+        report.semantic_sha256(),
+        format!("{:x}", Sha256::digest(bytes))
+    );
+    let published: serde_json::Value =
+        serde_json::from_slice(&report.published_bytes().unwrap()).unwrap();
+    assert_eq!(published["semantic_sha256"], report.semantic_sha256());
+    assert_eq!(report.exit_code(), 0);
+}
+
+#[test]
+fn named_report_comparison_and_exit_precedence_are_closed() {
+    let environment = report::Environment::current();
+    let mut matching = named_case("policy-failure");
+    report::compare_case(&mut matching, &environment, &environment);
+    assert_eq!(matching.baseline_state, report::BaselineState::Match);
+    assert_eq!(
+        report::resolve_outcome(&[matching]),
+        (report::OverallState::CompleteMatch, 0)
+    );
+
+    let mut mismatched = named_case("success");
+    mismatched.observed_receipt_semantic_sha256 = Some("e".repeat(64));
+    report::compare_case(&mut mismatched, &environment, &environment);
+    assert_eq!(mismatched.baseline_state, report::BaselineState::Mismatch);
+    assert_eq!(
+        report::resolve_outcome(&[mismatched]),
+        (report::OverallState::BaselineMismatch, 4)
+    );
+
+    let mut incompatible = named_case("success");
+    let different = report::Environment::different_from(&environment);
+    report::compare_case(&mut incompatible, &environment, &different);
+    assert_eq!(
+        incompatible.baseline_state,
+        report::BaselineState::IncomparableEnvironment
+    );
+    incompatible.contract_state = report::ContractState::EvidenceRetentionFailed;
+    assert_eq!(
+        report::resolve_outcome(&[incompatible]),
+        (report::OverallState::IncomparableEnvironment, 5)
+    );
+
+    let mut expected_failure = named_case("policy-failure");
+    expected_failure.declared_outcome = report::Outcome::Failure;
+    expected_failure.observed_outcome = report::Outcome::Failure;
+    expected_failure.expected_primary_diagnostic_code = Some("input_outside_allowed_root".into());
+    expected_failure.observed_primary_diagnostic_code = Some("input_outside_allowed_root".into());
+    expected_failure.contract_state = report::evaluate_contract(
+        expected_failure.declared_outcome,
+        expected_failure.observed_outcome,
+        expected_failure.expected_primary_diagnostic_code.as_deref(),
+        expected_failure.observed_primary_diagnostic_code.as_deref(),
+        None,
+        None,
+    );
+    assert_eq!(
+        report::resolve_outcome(&[expected_failure]),
+        (report::OverallState::CompleteMatch, 0)
+    );
+
+    let mut not_compared = named_case("success");
+    not_compared.baseline_receipt_semantic_sha256 = None;
+    report::compare_case(&mut not_compared, &environment, &environment);
+    assert_eq!(
+        not_compared.baseline_state,
+        report::BaselineState::NotCompared
+    );
 }
 
 #[test]
@@ -988,6 +1375,8 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     let document = catalog_document(&[baseline_entry("fixture", &digest)]);
     bind_catalog_receipts(&root.0, &document);
     let catalog = catalog::validate_catalog_bytes(document.as_bytes(), &root.0).unwrap();
+    assert_eq!(catalog.fixture_sha256("fixture"), Some(digest.as_str()));
+    assert_eq!(catalog.fixture_sha256("unknown"), None);
     assert!(catalog.baseline("fixture").is_some());
     assert!(catalog.baseline("unknown").is_none());
     for (paths, codes) in [

@@ -3,11 +3,14 @@
 #[allow(dead_code)]
 mod catalog;
 mod legacy;
+#[allow(dead_code)] // PR4 consumes the in-memory report model when publication is introduced.
+mod report;
 #[allow(dead_code)]
 mod structural_catalog;
 
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -147,6 +150,9 @@ struct RunPlan {
     run_root: PathBuf,
     repository_root: PathBuf,
     catalog: PathBuf,
+    run_definition_sha256: String,
+    catalog_execution_revision_sha256: String,
+    catalog_metadata: catalog::ValidatedCatalog,
     cases: Vec<catalog::NamedRunCase>,
 }
 
@@ -188,10 +194,15 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("docmorph-evidence: {error}");
-            ExitCode::from(if error.starts_with("named_run_case_failed:") {
-                3
-            } else {
-                2
+            ExitCode::from(match error.as_str() {
+                "named_run_baseline_mismatch" => 4,
+                "named_run_incomparable_environment" => 5,
+                _ if error.starts_with("named_run_case_failed:")
+                    || error.starts_with("named_run_report_persistence_failed:") =>
+                {
+                    3
+                }
+                _ => 2,
             })
         }
     }
@@ -327,6 +338,9 @@ fn prepare_named(arguments: &NamedArguments) -> Result<RunPlan, String> {
         run_root: arguments.run_root.clone(),
         repository_root: arguments.repository_root.clone(),
         catalog: arguments.catalog.clone(),
+        run_definition_sha256: sha256(&definition),
+        catalog_execution_revision_sha256: catalog.execution_revision_sha256.clone(),
+        catalog_metadata: catalog,
         cases,
     })
 }
@@ -345,26 +359,188 @@ fn execute_named(plan: RunPlan) -> Result<(), String> {
         let case = &plan.cases[index];
         let receipt_dir = cases_root.join(format!("{index:02}-{}", case.id));
         index += 1;
-        let result = fs::create_dir(&receipt_dir)
-            .map_err(|_| CaseFailure::Directory("case_directory_create_failed".into()))
-            .and_then(|_| {
-                execute_legacy(
-                    vec!["docmorph-evidence".into()],
-                    Arguments {
-                        manifest: plan.repository_root.join(&case.operation_manifest),
-                        receipt_dir,
-                        catalog: plan.catalog.clone(),
-                        repository_root: plan.repository_root.clone(),
-                    },
-                )
-                .map_err(classify_case_error)
-            });
+        let result =
+            if case.id == "policy-failure" && named_fault() == Some("retain:policy-failure") {
+                Err(CaseFailure::Retention("receipt_retention_failed".into()))
+            } else {
+                fs::create_dir(&receipt_dir)
+                    .map_err(|_| CaseFailure::Directory("case_directory_create_failed".into()))
+                    .and_then(|_| {
+                        execute_legacy(
+                            vec!["docmorph-evidence".into()],
+                            Arguments {
+                                manifest: plan.repository_root.join(&case.operation_manifest),
+                                receipt_dir,
+                                catalog: plan.catalog.clone(),
+                                repository_root: plan.repository_root.clone(),
+                            },
+                        )
+                        .map_err(classify_case_error)
+                    })
+            };
         debug_assert_eq!(case.id, case_id);
         result
     });
-    outcome.errors.first().map_or(Ok(()), |error| {
-        Err(format!("named_run_case_failed:{error}"))
-    })
+    let records = plan
+        .cases
+        .iter()
+        .enumerate()
+        .map(|(index, case)| named_case_record(&plan, case, index, outcome.case_states[index]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = report::Report::new(
+        plan.run_definition_sha256,
+        plan.catalog_execution_revision_sha256,
+        report::Environment::current(),
+        records,
+    );
+    publish_report(
+        &plan.run_root,
+        &report
+            .published_bytes()
+            .map_err(|_| "report_serialize_failed")?,
+    )
+    .map_err(|code| format!("named_run_report_persistence_failed:{code}"))?;
+    match report.exit_code() {
+        0 => Ok(()),
+        4 => Err("named_run_baseline_mismatch".into()),
+        5 => Err("named_run_incomparable_environment".into()),
+        _ => Err(format!(
+            "named_run_case_failed:{}",
+            outcome.errors.first().expect("failed outcome has an error")
+        )),
+    }
+}
+
+fn named_case_record(
+    plan: &RunPlan,
+    case: &catalog::NamedRunCase,
+    index: usize,
+    state: ContractState,
+) -> Result<report::CaseRecord, String> {
+    let manifest_path = plan.repository_root.join(&case.operation_manifest);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|_| "report_manifest_unreadable")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|_| "report_manifest_invalid")?;
+    let fixture = manifest.fixtures.first().ok_or("report_manifest_invalid")?;
+    let receipt_path = plan
+        .run_root
+        .join(format!("cases/{index:02}-{}", case.id))
+        .join("receipt.json");
+    let receipt: Option<serde_json::Value> = fs::read(&receipt_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let observed = receipt.as_ref().and_then(|receipt| {
+        receipt["outcomes"]
+            .as_array()?
+            .iter()
+            .find(|item| item["id"] == fixture.id)
+    });
+    let declared_outcome = match fixture.expected_outcome {
+        ExpectedOutcome::Success => report::Outcome::Success,
+        ExpectedOutcome::Failure => report::Outcome::Failure,
+    };
+    let observed_outcome =
+        observed
+            .and_then(|item| item["outcome"].as_str())
+            .map_or(declared_outcome, |outcome| match outcome {
+                "failure" => report::Outcome::Failure,
+                _ => report::Outcome::Success,
+            });
+    let observed_diagnostic = observed
+        .and_then(|item| item["diagnostics"].as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item["code"].as_str())
+        .map(str::to_owned);
+    let retention_error = (state == ContractState::EvidenceRetentionFailed)
+        .then(|| "receipt_retention_failed".to_owned());
+    let contract_state = match state {
+        ContractState::Satisfied => report::ContractState::Satisfied,
+        ContractState::Violated => report::ContractState::Violated,
+        ContractState::ExecutionFailed => report::ContractState::ExecutionFailed,
+        ContractState::EvidenceRetentionFailed => report::ContractState::EvidenceRetentionFailed,
+    };
+    let baseline = plan.catalog_metadata.baseline(&fixture.id);
+    let mut record = report::CaseRecord {
+        id: case.id.clone(),
+        operation_manifest_sha256: sha256(&manifest_bytes),
+        declared_outcome,
+        observed_outcome,
+        expected_primary_diagnostic_code: fixture.expected_diagnostic_code.clone(),
+        observed_primary_diagnostic_code: observed_diagnostic,
+        declared_input_sha256: plan
+            .catalog_metadata
+            .fixture_sha256(&fixture.id)
+            .map(str::to_owned),
+        artifact_sha256: observed
+            .and_then(|item| item["artifact"]["sha256"].as_str())
+            .map(str::to_owned),
+        artifact_byte_len: observed.and_then(|item| item["artifact"]["byte_len"].as_u64()),
+        baseline_receipt_semantic_sha256: baseline
+            .map(|baseline| baseline.semantic_sha256().into()),
+        observed_receipt_semantic_sha256: receipt
+            .as_ref()
+            .and_then(|item| item["semantic_sha256"].as_str().map(str::to_owned)),
+        contract_state,
+        baseline_state: report::BaselineState::NotCompared,
+        execution_error_code: None,
+        retention_error_code: retention_error,
+    };
+    if let Some(baseline) = baseline {
+        let baseline_environment = fs::read(plan.repository_root.join(baseline.retained_receipt()))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|receipt| report::Environment::from_receipt(&receipt));
+        if let Some(baseline_environment) = baseline_environment {
+            report::compare_case(
+                &mut record,
+                &report::Environment::current(),
+                &baseline_environment,
+            );
+        }
+    }
+    Ok(record)
+}
+
+fn publish_report(run_root: &Path, bytes: &[u8]) -> Result<(), &'static str> {
+    let temporary = run_root.join(".report.json.tmp");
+    if named_fault() == Some("temp-create") {
+        return Err("report_temp_create_failed");
+    }
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|_| "report_temp_create_failed")?;
+        if named_fault() == Some("temp-write") {
+            return Err("report_temp_write_failed");
+        }
+        file.write_all(bytes)
+            .map_err(|_| "report_temp_write_failed")?;
+        if named_fault() == Some("temp-flush") {
+            return Err("report_temp_flush_failed");
+        }
+        file.flush().map_err(|_| "report_temp_flush_failed")?;
+        if named_fault() == Some("rename") {
+            return Err("report_rename_failed");
+        }
+        fs::rename(&temporary, run_root.join("report.json")).map_err(|_| "report_rename_failed")
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+fn named_fault() -> Option<&'static str> {
+    match env::var("DOCMORPH_NAMED_FAULT").ok().as_deref() {
+        Some("temp-create") => Some("temp-create"),
+        Some("temp-write") => Some("temp-write"),
+        Some("temp-flush") => Some("temp-flush"),
+        Some("rename") => Some("rename"),
+        Some("retain:policy-failure") => Some("retain:policy-failure"),
+        _ => None,
+    }
 }
 
 fn classify_case_error(error: String) -> CaseFailure {
