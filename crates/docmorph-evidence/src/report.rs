@@ -67,13 +67,16 @@ impl Environment {
 
     #[allow(dead_code)]
     pub fn from_receipt(receipt: &serde_json::Value) -> Option<Self> {
+        Self::try_from_receipt(receipt).ok()
+    }
+
+    pub(crate) fn try_from_receipt(receipt: &serde_json::Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(serde_json::json!({
-            "toolchain": receipt.get("toolchain")?,
-            "build_compiler": receipt.get("build_compiler")?,
-            "platform": receipt.get("platform")?,
-            "adapter": receipt.get("adapter")?,
+            "toolchain": receipt.get("toolchain").unwrap_or(&serde_json::Value::Null),
+            "build_compiler": receipt.get("build_compiler").unwrap_or(&serde_json::Value::Null),
+            "platform": receipt.get("platform").unwrap_or(&serde_json::Value::Null),
+            "adapter": receipt.get("adapter").unwrap_or(&serde_json::Value::Null),
         }))
-        .ok()
     }
 }
 

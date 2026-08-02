@@ -636,6 +636,104 @@ fn named_preflight_rejects_existing_root_without_changing_its_bytes() {
 }
 
 #[test]
+fn named_preflight_rejects_invalid_populated_baseline_provenance() {
+    let cases = [
+        ("toolchain", None, None),
+        ("build_compiler", None, None),
+        ("platform", None, None),
+        ("adapter", None, None),
+        (
+            "toolchain.rust_version missing",
+            Some("toolchain"),
+            Some("rust_version"),
+        ),
+        (
+            "build_compiler.release missing",
+            Some("build_compiler"),
+            Some("release"),
+        ),
+        (
+            "build_compiler.commit_hash missing",
+            Some("build_compiler"),
+            Some("commit_hash"),
+        ),
+        (
+            "build_compiler.host missing",
+            Some("build_compiler"),
+            Some("host"),
+        ),
+        (
+            "build_compiler.llvm_version missing",
+            Some("build_compiler"),
+            Some("llvm_version"),
+        ),
+        ("platform.family missing", Some("platform"), Some("family")),
+        ("platform.os missing", Some("platform"), Some("os")),
+        ("platform.arch missing", Some("platform"), Some("arch")),
+        ("adapter.name missing", Some("adapter"), Some("name")),
+        ("adapter.version missing", Some("adapter"), Some("version")),
+        ("toolchain.rust_version malformed", Some("toolchain"), None),
+        (
+            "build_compiler.release malformed",
+            Some("build_compiler"),
+            None,
+        ),
+        (
+            "build_compiler.commit_hash malformed",
+            Some("build_compiler"),
+            None,
+        ),
+        (
+            "build_compiler.host malformed",
+            Some("build_compiler"),
+            None,
+        ),
+        (
+            "build_compiler.llvm_version malformed",
+            Some("build_compiler"),
+            None,
+        ),
+        ("platform.family malformed", Some("platform"), None),
+        ("platform.os malformed", Some("platform"), None),
+        ("platform.arch malformed", Some("platform"), None),
+        ("adapter.name malformed", Some("adapter"), None),
+        ("adapter.version malformed", Some("adapter"), None),
+    ];
+    for (name, object, field) in cases {
+        let root = comparable_root();
+        let run_root = root.0.join("named-run");
+        let receipt_path = root.0.join("evidence/success/receipt.json");
+        let mut receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        match (object, field) {
+            (None, None) => {
+                receipt.as_object_mut().unwrap().remove(name);
+            }
+            (Some(object), Some(field)) => {
+                receipt[object].as_object_mut().unwrap().remove(field);
+            }
+            (Some(object), None) => {
+                let field = name.split_once('.').unwrap().1.split_once(' ').unwrap().0;
+                receipt[object][field] = 7.into();
+            }
+            (None, Some(_)) => unreachable!(),
+        };
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+        let output = run_arguments(&named_arguments(&root.0, &run_root));
+
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "docmorph-evidence: catalog_invalid:baseline_environment_provenance_invalid\n",
+            "{name}"
+        );
+        assert!(!run_root.exists(), "{name}");
+        assert!(!run_root.join("report.json").exists(), "{name}");
+    }
+}
+
+#[test]
 fn named_execution_creates_isolated_ordered_case_evidence() {
     let root = comparable_root();
     let run_root = root.0.join("named-run");
@@ -1364,7 +1462,7 @@ fn write_graph(root: &std::path::Path, id: &str) -> String {
     fs::write(&input, b"input").unwrap();
     let manifest = format!(r#"{{"fixtures":[{{"id":"{id}","input":"fixtures/input.txt"}}]}}"#);
     fs::write(root.join("baseline.json"), &manifest).unwrap();
-    fs::write(root.join("receipt.json"), format!(r#"{{"manifest_sha256":"{:x}","semantic_sha256":"{}","outcomes":[{{"id":"{id}","outcome":"success","expected_diagnostic_code":null}}]}}"#, Sha256::digest(manifest), "a".repeat(64))).unwrap();
+    fs::write(root.join("receipt.json"), format!(r#"{{"manifest_sha256":"{:x}","semantic_sha256":"{}","toolchain":{{"rust_version":"1.96.0"}},"build_compiler":{{"release":"test","commit_hash":"test","host":"test","llvm_version":"test"}},"platform":{{"family":"test","os":"test","arch":"test"}},"adapter":{{"name":"test","version":"test"}},"outcomes":[{{"id":"{id}","outcome":"success","expected_diagnostic_code":null}}]}}"#, Sha256::digest(manifest), "a".repeat(64))).unwrap();
     format!("{:x}", Sha256::digest(b"input"))
 }
 
