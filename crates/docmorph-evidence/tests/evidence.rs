@@ -761,6 +761,10 @@ fn named_report_projection_is_compact_ordered_and_self_excluding() {
         report.semantic_sha256(),
         format!("{:x}", Sha256::digest(bytes))
     );
+    let published: serde_json::Value =
+        serde_json::from_slice(&report.published_bytes().unwrap()).unwrap();
+    assert_eq!(published["semantic_sha256"], report.semantic_sha256());
+    assert_eq!(report.exit_code(), 0);
 }
 
 #[test]
@@ -1197,6 +1201,8 @@ fn catalog_requires_complete_safe_and_relocatable_baseline_graphs() {
     let document = catalog_document(&[baseline_entry("fixture", &digest)]);
     bind_catalog_receipts(&root.0, &document);
     let catalog = catalog::validate_catalog_bytes(document.as_bytes(), &root.0).unwrap();
+    assert_eq!(catalog.fixture_sha256("fixture"), Some(digest.as_str()));
+    assert_eq!(catalog.fixture_sha256("unknown"), None);
     assert!(catalog.baseline("fixture").is_some());
     assert!(catalog.baseline("unknown").is_none());
     for (paths, codes) in [
