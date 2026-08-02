@@ -62,6 +62,9 @@ The current mock evidence harness requires `--manifest`, `--receipt-dir`, `--cat
 
 This is a semantic comparison procedure. It does not claim equality of receipt bytes, paths, or timestamps. Retained receipt/catalog links remain graph-validated; the procedure does not broaden lifecycle policy, public contracts, fixture content, engine capability, or ad-hoc manifest membership behavior.
 
+### Named synthetic run
+`synthetic-smoke` is the only governed named workflow: it executes mock-text `policy-failure` then `success` in a fresh run root and publishes one aggregate report. Exit `0` is a complete comparable match, `4` is a comparable mismatch, and `5` is an incomparable environment; neither outcome selects a PDF engine or claims PDF fidelity. This adds no receipt-1.2 migration: retained receipts stay comparison inputs and legacy `--manifest` behavior remains unchanged.
+
 ## Phase 2: Isolated Engine Spikes
 
 Spike two or three candidates with permissive licenses. Begin with the candidates named in ADR 0004, including `pdfium-render` 0.9.3 as a pre-1.0 spike candidate and `lopdf`; introduce a third candidate only when it provides a meaningful comparison. Evaluate an isolated Python worker only if Rust/native candidates leave a documented gap worth its packaging and observability cost.
