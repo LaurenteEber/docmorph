@@ -100,11 +100,16 @@ pub struct ValidatedCatalog {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedBaseline {
-    _link: BaselineLink,
+    link: BaselineLink,
 }
 impl ValidatedBaseline {
     pub(crate) fn semantic_sha256(&self) -> &str {
-        &self._link.semantic_sha256
+        &self.link.semantic_sha256
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn retained_receipt(&self) -> &str {
+        &self.link.retained_receipt
     }
 }
 impl ValidatedCatalog {
@@ -208,7 +213,7 @@ pub fn validate_named_definition_bytes(
         catalog
             .baselines
             .get(&case.id)
-            .map(|baseline| baseline._link.operation_manifest.as_str())
+            .map(|baseline| baseline.link.operation_manifest.as_str())
             .is_some_and(|expected| expected != case.operation_manifest)
     }) {
         return Err(NamedDefinitionErrors(vec![
@@ -283,7 +288,7 @@ pub fn validate_catalog_bytes(
                     &execution_revision_sha256,
                     &mut findings,
                 )
-                .map(|link| (fixture.id.clone(), ValidatedBaseline { _link: link }))
+                .map(|link| (fixture.id.clone(), ValidatedBaseline { link }))
             })
         })
         .collect();

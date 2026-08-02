@@ -721,6 +721,113 @@ fn named_execution_failure_uses_catalog_digest_without_rereading_rejected_input(
     );
 }
 
+fn named_report(root: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn named_membership_exclusion() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&repository_root(), &run_root));
+    assert_eq!(output.status.code(), Some(0));
+    let report = named_report(&run_root);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(report["cases"][0]["id"], "policy-failure");
+    assert_eq!(report["cases"][1]["id"], "success");
+    assert_eq!(report["cases"][1]["baseline_state"], "match");
+    assert!(!report.to_string().contains("pdf"));
+}
+
+#[test]
+fn named_determinism() {
+    let root = TempRoot::new();
+    let first_root = root.0.join("first");
+    let second_root = root.0.join("second");
+    assert_eq!(
+        run_arguments(&named_arguments(&repository_root(), &first_root))
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_arguments(&named_arguments(&repository_root(), &second_root))
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        named_report(&first_root)["semantic_sha256"],
+        named_report(&second_root)["semantic_sha256"]
+    );
+}
+
+#[test]
+fn named_mismatch_exit() {
+    let root = retained_graph();
+    let run_root = root.0.join("named-run");
+    let semantic_sha256 = "0".repeat(64);
+    let catalog_path = root.0.join("fixtures/corpus-manifest.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+    catalog["fixtures"][1]["baseline"]["semantic_sha256"] = semantic_sha256.clone().into();
+    fs::write(&catalog_path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let receipt_path = root.0.join("evidence/success/receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["semantic_sha256"] = semantic_sha256.into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "baseline_mismatch"
+    );
+}
+
+#[test]
+fn named_incomparable_exit() {
+    let root = retained_graph();
+    let run_root = root.0.join("named-run");
+    let receipt_path = root.0.join("evidence/success/receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["platform"]["arch"] = "incomparable".into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let output = run_arguments(&named_arguments(&root.0, &run_root));
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "incomparable_environment"
+    );
+}
+
+#[test]
+fn named_continuation() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&repository_root(), &run_root),
+        "retain:policy-failure",
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    assert_eq!(
+        named_report(&run_root)["overall_state"],
+        "case_evidence_retention_failure"
+    );
+}
+
+#[test]
+fn legacy_manifest_compatibility() {
+    let root = TempRoot::new();
+    let receipt_dir = root.0.join("legacy");
+    let output = run(&manifest(), &receipt_dir);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(receipt_dir.join("receipt.json").is_file());
+    assert!(!receipt_dir.join("report.json").exists());
+}
+
 fn named_case(id: &str) -> report::CaseRecord {
     report::CaseRecord {
         id: id.into(),

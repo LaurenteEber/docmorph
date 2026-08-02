@@ -194,15 +194,16 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("docmorph-evidence: {error}");
-            ExitCode::from(
-                if error.starts_with("named_run_case_failed:")
-                    || error.starts_with("named_run_report_persistence_failed:")
+            ExitCode::from(match error.as_str() {
+                "named_run_baseline_mismatch" => 4,
+                "named_run_incomparable_environment" => 5,
+                _ if error.starts_with("named_run_case_failed:")
+                    || error.starts_with("named_run_report_persistence_failed:") =>
                 {
                     3
-                } else {
-                    2
-                },
-            )
+                }
+                _ => 2,
+            })
         }
     }
 }
@@ -399,13 +400,14 @@ fn execute_named(plan: RunPlan) -> Result<(), String> {
             .map_err(|_| "report_serialize_failed")?,
     )
     .map_err(|code| format!("named_run_report_persistence_failed:{code}"))?;
-    if report.exit_code() == 0 {
-        Ok(())
-    } else {
-        Err(format!(
+    match report.exit_code() {
+        0 => Ok(()),
+        4 => Err("named_run_baseline_mismatch".into()),
+        5 => Err("named_run_incomparable_environment".into()),
+        _ => Err(format!(
             "named_run_case_failed:{}",
             outcome.errors.first().expect("failed outcome has an error")
-        ))
+        )),
     }
 }
 
@@ -457,7 +459,8 @@ fn named_case_record(
         ContractState::ExecutionFailed => report::ContractState::ExecutionFailed,
         ContractState::EvidenceRetentionFailed => report::ContractState::EvidenceRetentionFailed,
     };
-    Ok(report::CaseRecord {
+    let baseline = plan.catalog_metadata.baseline(&fixture.id);
+    let mut record = report::CaseRecord {
         id: case.id.clone(),
         operation_manifest_sha256: sha256(&manifest_bytes),
         declared_outcome,
@@ -472,7 +475,8 @@ fn named_case_record(
             .and_then(|item| item["artifact"]["sha256"].as_str())
             .map(str::to_owned),
         artifact_byte_len: observed.and_then(|item| item["artifact"]["byte_len"].as_u64()),
-        baseline_receipt_semantic_sha256: None,
+        baseline_receipt_semantic_sha256: baseline
+            .map(|baseline| baseline.semantic_sha256().into()),
         observed_receipt_semantic_sha256: receipt
             .as_ref()
             .and_then(|item| item["semantic_sha256"].as_str().map(str::to_owned)),
@@ -480,7 +484,21 @@ fn named_case_record(
         baseline_state: report::BaselineState::NotCompared,
         execution_error_code: None,
         retention_error_code: retention_error,
-    })
+    };
+    if let Some(baseline) = baseline {
+        let baseline_environment = fs::read(plan.repository_root.join(baseline.retained_receipt()))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .and_then(|receipt| report::Environment::from_receipt(&receipt));
+        if let Some(baseline_environment) = baseline_environment {
+            report::compare_case(
+                &mut record,
+                &report::Environment::current(),
+                &baseline_environment,
+            );
+        }
+    }
+    Ok(record)
 }
 
 fn publish_report(run_root: &Path, bytes: &[u8]) -> Result<(), &'static str> {
