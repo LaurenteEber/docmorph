@@ -95,18 +95,28 @@ pub struct ValidatedCatalog {
     pub revision_sha256: String,
     pub execution_revision_sha256: String,
     fixture_ids: Vec<String>,
+    fixture_sha256: BTreeMap<String, String>,
     baselines: BTreeMap<String, ValidatedBaseline>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedBaseline {
-    _link: BaselineLink,
+    link: BaselineLink,
 }
 impl ValidatedBaseline {
     pub(crate) fn semantic_sha256(&self) -> &str {
-        &self._link.semantic_sha256
+        &self.link.semantic_sha256
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn retained_receipt(&self) -> &str {
+        &self.link.retained_receipt
     }
 }
 impl ValidatedCatalog {
+    pub(crate) fn fixture_sha256(&self, id: &str) -> Option<&str> {
+        self.fixture_sha256.get(id).map(String::as_str)
+    }
+
     pub(crate) fn baseline(&self, id: &str) -> Option<&ValidatedBaseline> {
         self.baselines.get(id)
     }
@@ -203,7 +213,7 @@ pub fn validate_named_definition_bytes(
         catalog
             .baselines
             .get(&case.id)
-            .map(|baseline| baseline._link.operation_manifest.as_str())
+            .map(|baseline| baseline.link.operation_manifest.as_str())
             .is_some_and(|expected| expected != case.operation_manifest)
     }) {
         return Err(NamedDefinitionErrors(vec![
@@ -278,7 +288,7 @@ pub fn validate_catalog_bytes(
                     &execution_revision_sha256,
                     &mut findings,
                 )
-                .map(|link| (fixture.id.clone(), ValidatedBaseline { _link: link }))
+                .map(|link| (fixture.id.clone(), ValidatedBaseline { link }))
             })
         })
         .collect();
@@ -291,6 +301,10 @@ pub fn validate_catalog_bytes(
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
         execution_revision_sha256,
         fixture_ids: fixtures.iter().map(|fixture| fixture.id.clone()).collect(),
+        fixture_sha256: fixtures
+            .iter()
+            .map(|fixture| (fixture.id.clone(), fixture.sha256.clone()))
+            .collect(),
         baselines,
     })
 }

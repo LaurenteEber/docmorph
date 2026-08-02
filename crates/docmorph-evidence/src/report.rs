@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Environment {
     toolchain: Toolchain,
     build_compiler: BuildCompiler,
@@ -9,12 +9,12 @@ pub struct Environment {
     adapter: Adapter,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Toolchain {
     rust_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct BuildCompiler {
     release: String,
     commit_hash: String,
@@ -22,14 +22,14 @@ struct BuildCompiler {
     llvm_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Platform {
     family: String,
     os: String,
     arch: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Adapter {
     name: String,
     version: String,
@@ -54,7 +54,7 @@ impl Environment {
             },
             adapter: Adapter {
                 name: "mock".into(),
-                version: "1.0".into(),
+                version: "0.1.0".into(),
             },
         }
     }
@@ -63,6 +63,17 @@ impl Environment {
         let mut different = environment.clone();
         different.adapter.version.push_str("-different");
         different
+    }
+
+    #[allow(dead_code)]
+    pub fn from_receipt(receipt: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(serde_json::json!({
+            "toolchain": receipt.get("toolchain")?,
+            "build_compiler": receipt.get("build_compiler")?,
+            "platform": receipt.get("platform")?,
+            "adapter": receipt.get("adapter")?,
+        }))
+        .ok()
     }
 }
 
@@ -134,6 +145,20 @@ struct Projection<'a> {
     overall_state: OverallState,
 }
 
+#[derive(Serialize)]
+struct PublishedReport<'a> {
+    schema_version: &'static str,
+    run_name: &'static str,
+    run_definition_schema_version: &'static str,
+    run_definition_sha256: &'a str,
+    catalog_id: &'static str,
+    catalog_execution_revision_sha256: &'a str,
+    environment: &'a Environment,
+    cases: &'a [CaseRecord],
+    overall_state: OverallState,
+    semantic_sha256: String,
+}
+
 pub struct Report {
     run_definition_sha256: String,
     catalog_execution_revision_sha256: String,
@@ -176,6 +201,26 @@ impl Report {
             "{:x}",
             Sha256::digest(self.canonical_bytes().expect("report is serializable"))
         )
+    }
+
+    pub fn published_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let (overall_state, _) = resolve_outcome(&self.cases);
+        serde_json::to_vec(&PublishedReport {
+            schema_version: "1.0",
+            run_name: "synthetic-smoke",
+            run_definition_schema_version: "1.0",
+            run_definition_sha256: &self.run_definition_sha256,
+            catalog_id: "docmorph-phase1-synthetic-smoke",
+            catalog_execution_revision_sha256: &self.catalog_execution_revision_sha256,
+            environment: &self.environment,
+            cases: &self.cases,
+            overall_state,
+            semantic_sha256: self.semantic_sha256(),
+        })
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        resolve_outcome(&self.cases).1
     }
 }
 
