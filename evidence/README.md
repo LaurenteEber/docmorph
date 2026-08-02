@@ -7,8 +7,8 @@ This directory retains deterministic receipts for the Phase 0 mock evidence scen
 The separate structural catalog documents a project-authored PDF corpus whose files and provenance records are available in a clean checkout. Its structural-only declarations validate page origin, order, count, geometry, and rotation; they are baseline-free and do not execute PDFs or establish a supported capability.
 
 ## Named synthetic workflow
-Run the sole governed mock-only corpus in a fresh root: `cargo run -p docmorph-evidence --locked -- --named-run synthetic-smoke --run-root "$(mktemp -d "${TMPDIR:-/tmp}/docmorph-named.XXXXXX")" --repository-root .`
-`report.json` records only `policy-failure` then `success`; no PDF engine, structural PDF fixture, visual comparison, or fidelity claim is selected. Exit `0` means complete comparable matches, `4` means a comparable baseline mismatch, and `5` means an incomparable environment. The retained schema-1.2 receipts remain legacy comparison inputs; named runs do not rewrite or migrate them.
+Run the sole governed mock-only corpus in a fresh root: `cargo run -p docmorph-evidence --locked -- --named-run synthetic-smoke --run-root "$(mktemp -d "${TMPDIR:-/tmp}/docmorph-named.XXXXXX")/run" --repository-root .`
+`report.json` records only `policy-failure` then `success`; no PDF engine, structural PDF fixture, visual comparison, or fidelity claim is selected. Exit `0` means every case completed with a comparable baseline match; exit `2` means write-free preflight or configuration rejection; exit `3` means an operational failure or report-persistence failure after the run root is acquired; exit `4` means at least one comparable baseline mismatch and no higher-precedence failure; and exit `5` means at least one incomparable environment and no operational failure. The retained schema-1.2 receipts remain legacy comparison inputs; named runs do not rewrite or migrate them.
 
 ## Governed reproduction
 
