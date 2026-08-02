@@ -134,6 +134,20 @@ struct Projection<'a> {
     overall_state: OverallState,
 }
 
+#[derive(Serialize)]
+struct PublishedReport<'a> {
+    schema_version: &'static str,
+    run_name: &'static str,
+    run_definition_schema_version: &'static str,
+    run_definition_sha256: &'a str,
+    catalog_id: &'static str,
+    catalog_execution_revision_sha256: &'a str,
+    environment: &'a Environment,
+    cases: &'a [CaseRecord],
+    overall_state: OverallState,
+    semantic_sha256: String,
+}
+
 pub struct Report {
     run_definition_sha256: String,
     catalog_execution_revision_sha256: String,
@@ -176,6 +190,26 @@ impl Report {
             "{:x}",
             Sha256::digest(self.canonical_bytes().expect("report is serializable"))
         )
+    }
+
+    pub fn published_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let (overall_state, _) = resolve_outcome(&self.cases);
+        serde_json::to_vec(&PublishedReport {
+            schema_version: "1.0",
+            run_name: "synthetic-smoke",
+            run_definition_schema_version: "1.0",
+            run_definition_sha256: &self.run_definition_sha256,
+            catalog_id: "docmorph-phase1-synthetic-smoke",
+            catalog_execution_revision_sha256: &self.catalog_execution_revision_sha256,
+            environment: &self.environment,
+            cases: &self.cases,
+            overall_state,
+            semantic_sha256: self.semantic_sha256(),
+        })
+    }
+
+    pub fn exit_code(&self) -> u8 {
+        resolve_outcome(&self.cases).1
     }
 }
 

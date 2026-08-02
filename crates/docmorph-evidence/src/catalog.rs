@@ -95,6 +95,7 @@ pub struct ValidatedCatalog {
     pub revision_sha256: String,
     pub execution_revision_sha256: String,
     fixture_ids: Vec<String>,
+    fixture_sha256: BTreeMap<String, String>,
     baselines: BTreeMap<String, ValidatedBaseline>,
 }
 #[derive(Clone, Debug)]
@@ -107,6 +108,10 @@ impl ValidatedBaseline {
     }
 }
 impl ValidatedCatalog {
+    pub(crate) fn fixture_sha256(&self, id: &str) -> Option<&str> {
+        self.fixture_sha256.get(id).map(String::as_str)
+    }
+
     pub(crate) fn baseline(&self, id: &str) -> Option<&ValidatedBaseline> {
         self.baselines.get(id)
     }
@@ -291,6 +296,10 @@ pub fn validate_catalog_bytes(
         revision_sha256: format!("{:x}", Sha256::digest(canonical)),
         execution_revision_sha256,
         fixture_ids: fixtures.iter().map(|fixture| fixture.id.clone()).collect(),
+        fixture_sha256: fixtures
+            .iter()
+            .map(|fixture| (fixture.id.clone(), fixture.sha256.clone()))
+            .collect(),
         baselines,
     })
 }

@@ -95,6 +95,18 @@ fn run_arguments(arguments: &[PathBuf]) -> Output {
         .expect("evidence binary spawns")
 }
 
+fn run_named_fault(arguments: &[PathBuf], fault: &str) -> Output {
+    let arguments = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    Command::new(env!("CARGO_BIN_EXE_docmorph-evidence"))
+        .args(arguments)
+        .env("DOCMORPH_NAMED_FAULT", fault)
+        .output()
+        .expect("evidence binary spawns")
+}
+
 fn named_arguments(root: &std::path::Path, run_root: &std::path::Path) -> Vec<PathBuf> {
     vec![
         "--named-run".into(),
@@ -582,7 +594,93 @@ fn named_execution_creates_isolated_ordered_case_evidence() {
 }
 
 #[test]
-fn named_execution_continues_after_a_case_execution_failure() {
+fn named_persistence_complete_publication() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_arguments(&named_arguments(&repository_root(), &run_root));
+
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(
+        &fs::read(run_root.join("report.json")).expect("complete report is published"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["overall_state"], "complete_match");
+    assert_eq!(report["cases"][0]["id"], "policy-failure");
+    assert_eq!(report["cases"][1]["id"], "success");
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_temp_create_failure_is_truthful_and_clean() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&repository_root(), &run_root),
+        "temp-create",
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "docmorph-evidence: named_run_report_persistence_failed:report_temp_create_failed\n"
+    );
+    assert!(!run_root.join("report.json").exists());
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_temp_write_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("temp-write", "report_temp_write_failed");
+}
+
+#[test]
+fn named_persistence_temp_flush_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("temp-flush", "report_temp_flush_failed");
+}
+
+#[test]
+fn named_persistence_rename_failure_is_truthful_and_clean() {
+    assert_named_persistence_fault("rename", "report_rename_failed");
+}
+
+fn assert_named_persistence_fault(fault: &str, code: &str) {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(&named_arguments(&repository_root(), &run_root), fault);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("docmorph-evidence: named_run_report_persistence_failed:{code}\n")
+    );
+    assert!(!run_root.join("report.json").exists());
+    assert!(!run_root.join(".report.json.tmp").exists());
+}
+
+#[test]
+fn named_persistence_retention_failure_keeps_later_success_and_report() {
+    let root = TempRoot::new();
+    let run_root = root.0.join("named-run");
+    let output = run_named_fault(
+        &named_arguments(&repository_root(), &run_root),
+        "retain:policy-failure",
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["overall_state"], "case_evidence_retention_failure");
+    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["cases"][0]["contract_state"],
+        "evidence_retention_failed"
+    );
+    assert_eq!(report["cases"][1]["contract_state"], "satisfied");
+}
+
+#[test]
+fn named_execution_failure_uses_catalog_digest_without_rereading_rejected_input() {
     let root = retained_graph();
     let run_root = root.0.join("named-run");
     let manifest = root
@@ -592,7 +690,8 @@ fn named_execution_continues_after_a_case_execution_failure() {
         &manifest,
         fs::read_to_string(&manifest)
             .unwrap()
-            .replace("\"expected_outcome\": \"failure\",\n      \"expected_diagnostic_code\": \"input_outside_allowed_root\"", "\"expected_outcome\": \"success\""),
+            .replace("\"expected_outcome\": \"failure\",\n      \"expected_diagnostic_code\": \"input_outside_allowed_root\"", "\"expected_outcome\": \"success\"")
+            .replace("mock/policy-failure-input.txt", "/dev/null"),
     )
     .unwrap();
     let catalog_path = root.0.join("fixtures/corpus-manifest.json");
@@ -614,6 +713,12 @@ fn named_execution_continues_after_a_case_execution_failure() {
             .contains("named_run_case_failed:policy-failure")
     );
     assert!(run_root.join("cases/01-success/receipt.json").is_file());
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["cases"][0]["declared_input_sha256"],
+        catalog["fixtures"][0]["sha256"]
+    );
 }
 
 fn named_case(id: &str) -> report::CaseRecord {
