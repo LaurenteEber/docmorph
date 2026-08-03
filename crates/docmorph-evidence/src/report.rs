@@ -260,12 +260,6 @@ pub fn evaluate_contract(
 }
 
 pub fn resolve_outcome(cases: &[CaseRecord]) -> (OverallState, u8) {
-    if cases
-        .iter()
-        .any(|case| case.baseline_state == BaselineState::IncomparableEnvironment)
-    {
-        return (OverallState::IncomparableEnvironment, 5);
-    }
     for (state, overall) in [
         (
             ContractState::EvidenceRetentionFailed,
@@ -283,10 +277,60 @@ pub fn resolve_outcome(cases: &[CaseRecord]) -> (OverallState, u8) {
     }
     if cases
         .iter()
+        .any(|case| case.baseline_state == BaselineState::IncomparableEnvironment)
+    {
+        return (OverallState::IncomparableEnvironment, 5);
+    }
+    if cases
+        .iter()
         .any(|case| case.baseline_state == BaselineState::Mismatch)
     {
         (OverallState::BaselineMismatch, 4)
     } else {
         (OverallState::CompleteMatch, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(id: &str) -> CaseRecord {
+        CaseRecord {
+            id: id.into(),
+            operation_manifest_sha256: "a".repeat(64),
+            declared_outcome: Outcome::Success,
+            observed_outcome: Outcome::Success,
+            expected_primary_diagnostic_code: None,
+            observed_primary_diagnostic_code: None,
+            declared_input_sha256: Some("b".repeat(64)),
+            artifact_sha256: Some("c".repeat(64)),
+            artifact_byte_len: Some(37),
+            baseline_receipt_semantic_sha256: Some("d".repeat(64)),
+            observed_receipt_semantic_sha256: Some("d".repeat(64)),
+            contract_state: ContractState::Satisfied,
+            baseline_state: BaselineState::Match,
+            execution_error_code: None,
+            retention_error_code: None,
+        }
+    }
+
+    #[test]
+    fn operational_failure_outranks_incomparable() {
+        let mut operational_failure = case("policy-failure");
+        operational_failure.contract_state = ContractState::ExecutionFailed;
+        operational_failure.execution_error_code = Some("execution_failed".into());
+        let mut incomparable = case("success");
+        incomparable.baseline_state = BaselineState::IncomparableEnvironment;
+
+        assert_eq!(
+            resolve_outcome(&[operational_failure, incomparable.clone()]),
+            (OverallState::CaseExecutionFailure, 3)
+        );
+
+        assert_eq!(
+            resolve_outcome(&[case("success"), incomparable]),
+            (OverallState::IncomparableEnvironment, 5)
+        );
     }
 }
