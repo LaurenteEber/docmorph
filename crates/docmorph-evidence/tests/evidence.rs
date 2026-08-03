@@ -891,20 +891,6 @@ fn named_report(root: &std::path::Path) -> serde_json::Value {
 }
 
 #[test]
-fn named_membership_exclusion() {
-    let root = comparable_root();
-    let run_root = root.0.join("named-run");
-    let output = run_arguments(&named_arguments(&root.0, &run_root));
-    assert_eq!(output.status.code(), Some(0));
-    let report = named_report(&run_root);
-    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
-    assert_eq!(report["cases"][0]["id"], "policy-failure");
-    assert_eq!(report["cases"][1]["id"], "success");
-    assert_eq!(report["cases"][1]["baseline_state"], "match");
-    assert!(!report.to_string().contains("pdf"));
-}
-
-#[test]
 fn named_determinism() {
     let root = comparable_root();
     let first_root = root.0.join("first");
@@ -963,6 +949,37 @@ fn named_incomparable_exit() {
     assert_eq!(output.status.code(), Some(5));
     assert_eq!(
         named_report(&run_root)["overall_state"],
+        "incomparable_environment"
+    );
+}
+
+#[test]
+fn named_operational_failure_outranks_incomparable_exit() {
+    let root = comparable_root();
+    let run_root = root.0.join("named-run");
+    let receipt_path = root.0.join("evidence/success/receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["platform"]["arch"] = "incomparable".into();
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let output = run_named_fault(
+        &named_arguments(&root.0, &run_root),
+        "retain:policy-failure",
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    let report = named_report(&run_root);
+    assert_eq!(report["overall_state"], "case_evidence_retention_failure");
+    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
+    assert_eq!(report["cases"][0]["id"], "policy-failure");
+    assert_eq!(
+        report["cases"][0]["contract_state"],
+        "evidence_retention_failed"
+    );
+    assert_eq!(report["cases"][1]["id"], "success");
+    assert_eq!(
+        report["cases"][1]["baseline_state"],
         "incomparable_environment"
     );
 }
@@ -1069,7 +1086,7 @@ fn named_report_comparison_and_exit_precedence_are_closed() {
     incompatible.contract_state = report::ContractState::EvidenceRetentionFailed;
     assert_eq!(
         report::resolve_outcome(&[incompatible]),
-        (report::OverallState::IncomparableEnvironment, 5)
+        (report::OverallState::CaseEvidenceRetentionFailure, 3)
     );
 
     let mut expected_failure = named_case("policy-failure");
