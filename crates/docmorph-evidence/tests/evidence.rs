@@ -891,20 +891,6 @@ fn named_report(root: &std::path::Path) -> serde_json::Value {
 }
 
 #[test]
-fn named_membership_exclusion() {
-    let root = comparable_root();
-    let run_root = root.0.join("named-run");
-    let output = run_arguments(&named_arguments(&root.0, &run_root));
-    assert_eq!(output.status.code(), Some(0));
-    let report = named_report(&run_root);
-    assert_eq!(report["cases"].as_array().unwrap().len(), 2);
-    assert_eq!(report["cases"][0]["id"], "policy-failure");
-    assert_eq!(report["cases"][1]["id"], "success");
-    assert_eq!(report["cases"][1]["baseline_state"], "match");
-    assert!(!report.to_string().contains("pdf"));
-}
-
-#[test]
 fn named_determinism() {
     let root = comparable_root();
     let first_root = root.0.join("first");

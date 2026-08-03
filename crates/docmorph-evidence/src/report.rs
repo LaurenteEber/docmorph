@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use docmorph_core::{Adapter as CoreAdapter, MockAdapter};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Environment {
     toolchain: Toolchain,
@@ -37,6 +39,7 @@ struct Adapter {
 
 impl Environment {
     pub fn current() -> Self {
+        let adapter_identity = CoreAdapter::identity(&MockAdapter::default());
         Self {
             toolchain: Toolchain {
                 rust_version: env!("CARGO_PKG_RUST_VERSION").into(),
@@ -53,8 +56,8 @@ impl Environment {
                 arch: std::env::consts::ARCH.into(),
             },
             adapter: Adapter {
-                name: "mock".into(),
-                version: "0.1.0".into(),
+                name: adapter_identity.name,
+                version: adapter_identity.version,
             },
         }
     }
@@ -63,11 +66,6 @@ impl Environment {
         let mut different = environment.clone();
         different.adapter.version.push_str("-different");
         different
-    }
-
-    #[allow(dead_code)]
-    pub fn from_receipt(receipt: &serde_json::Value) -> Option<Self> {
-        Self::try_from_receipt(receipt).ok()
     }
 
     pub(crate) fn try_from_receipt(receipt: &serde_json::Value) -> Result<Self, serde_json::Error> {
