@@ -3,7 +3,7 @@
 #[allow(dead_code)]
 mod catalog;
 mod legacy;
-#[allow(dead_code)] // PR4 consumes the in-memory report model when publication is introduced.
+#[allow(dead_code)]
 mod report;
 #[allow(dead_code)]
 mod structural_catalog;
@@ -164,17 +164,6 @@ enum ContractState {
     EvidenceRetentionFailed,
 }
 
-#[allow(dead_code)] // Baseline comparison states are populated by PR3.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OverallState {
-    CompleteMatch,
-    BaselineMismatch,
-    IncomparableEnvironment,
-    CaseContractFailure,
-    CaseExecutionFailure,
-    CaseEvidenceRetentionFailure,
-}
-
 enum CaseFailure {
     Contract(String),
     Execution(String),
@@ -182,10 +171,9 @@ enum CaseFailure {
     Retention(String),
 }
 
-#[allow(dead_code)] // PR3 serializes these in the aggregate report.
+#[allow(dead_code)]
 struct NamedOutcome {
     case_states: Vec<ContractState>,
-    overall_state: OverallState,
     errors: Vec<String>,
 }
 
@@ -486,17 +474,11 @@ fn named_case_record(
         retention_error_code: retention_error,
     };
     if let Some(baseline) = baseline {
-        let baseline_environment = fs::read(plan.repository_root.join(baseline.retained_receipt()))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .and_then(|receipt| report::Environment::from_receipt(&receipt));
-        if let Some(baseline_environment) = baseline_environment {
-            report::compare_case(
-                &mut record,
-                &report::Environment::current(),
-                &baseline_environment,
-            );
-        }
+        report::compare_case(
+            &mut record,
+            &report::Environment::current(),
+            baseline.environment(),
+        );
     }
     Ok(record)
 }
@@ -580,19 +562,8 @@ fn run_case_state_machine(
             }
         }
     }
-    let overall_state = if case_states.contains(&ContractState::EvidenceRetentionFailed) {
-        OverallState::CaseEvidenceRetentionFailure
-    } else if case_states.contains(&ContractState::ExecutionFailed) {
-        OverallState::CaseExecutionFailure
-    } else if case_states.contains(&ContractState::Violated) {
-        OverallState::CaseContractFailure
-    } else {
-        // Baseline comparison is intentionally deferred to PR3.
-        OverallState::CompleteMatch
-    };
     NamedOutcome {
         case_states,
-        overall_state,
         errors,
     }
 }
@@ -801,7 +772,6 @@ mod tests {
             outcome.case_states,
             [ContractState::Violated, ContractState::Satisfied]
         );
-        assert_eq!(outcome.overall_state, OverallState::CaseContractFailure);
         assert_eq!(outcome.errors, ["policy-failure:declared_outcome_mismatch"]);
 
         let precedence =
@@ -813,10 +783,6 @@ mod tests {
                     _ => CaseFailure::Retention("receipt_retention_failed".into()),
                 })
             });
-        assert_eq!(
-            precedence.overall_state,
-            OverallState::CaseEvidenceRetentionFailure
-        );
         assert_eq!(
             precedence.errors,
             [

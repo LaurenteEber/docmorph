@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use docmorph_core::{Adapter as CoreAdapter, MockAdapter};
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Environment {
     toolchain: Toolchain,
@@ -37,6 +39,7 @@ struct Adapter {
 
 impl Environment {
     pub fn current() -> Self {
+        let adapter_identity = CoreAdapter::identity(&MockAdapter::default());
         Self {
             toolchain: Toolchain {
                 rust_version: env!("CARGO_PKG_RUST_VERSION").into(),
@@ -53,8 +56,8 @@ impl Environment {
                 arch: std::env::consts::ARCH.into(),
             },
             adapter: Adapter {
-                name: "mock".into(),
-                version: "0.1.0".into(),
+                name: adapter_identity.name,
+                version: adapter_identity.version,
             },
         }
     }
@@ -65,15 +68,13 @@ impl Environment {
         different
     }
 
-    #[allow(dead_code)]
-    pub fn from_receipt(receipt: &serde_json::Value) -> Option<Self> {
+    pub(crate) fn try_from_receipt(receipt: &serde_json::Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(serde_json::json!({
-            "toolchain": receipt.get("toolchain")?,
-            "build_compiler": receipt.get("build_compiler")?,
-            "platform": receipt.get("platform")?,
-            "adapter": receipt.get("adapter")?,
+            "toolchain": receipt.get("toolchain").unwrap_or(&serde_json::Value::Null),
+            "build_compiler": receipt.get("build_compiler").unwrap_or(&serde_json::Value::Null),
+            "platform": receipt.get("platform").unwrap_or(&serde_json::Value::Null),
+            "adapter": receipt.get("adapter").unwrap_or(&serde_json::Value::Null),
         }))
-        .ok()
     }
 }
 
@@ -259,12 +260,6 @@ pub fn evaluate_contract(
 }
 
 pub fn resolve_outcome(cases: &[CaseRecord]) -> (OverallState, u8) {
-    if cases
-        .iter()
-        .any(|case| case.baseline_state == BaselineState::IncomparableEnvironment)
-    {
-        return (OverallState::IncomparableEnvironment, 5);
-    }
     for (state, overall) in [
         (
             ContractState::EvidenceRetentionFailed,
@@ -282,10 +277,60 @@ pub fn resolve_outcome(cases: &[CaseRecord]) -> (OverallState, u8) {
     }
     if cases
         .iter()
+        .any(|case| case.baseline_state == BaselineState::IncomparableEnvironment)
+    {
+        return (OverallState::IncomparableEnvironment, 5);
+    }
+    if cases
+        .iter()
         .any(|case| case.baseline_state == BaselineState::Mismatch)
     {
         (OverallState::BaselineMismatch, 4)
     } else {
         (OverallState::CompleteMatch, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(id: &str) -> CaseRecord {
+        CaseRecord {
+            id: id.into(),
+            operation_manifest_sha256: "a".repeat(64),
+            declared_outcome: Outcome::Success,
+            observed_outcome: Outcome::Success,
+            expected_primary_diagnostic_code: None,
+            observed_primary_diagnostic_code: None,
+            declared_input_sha256: Some("b".repeat(64)),
+            artifact_sha256: Some("c".repeat(64)),
+            artifact_byte_len: Some(37),
+            baseline_receipt_semantic_sha256: Some("d".repeat(64)),
+            observed_receipt_semantic_sha256: Some("d".repeat(64)),
+            contract_state: ContractState::Satisfied,
+            baseline_state: BaselineState::Match,
+            execution_error_code: None,
+            retention_error_code: None,
+        }
+    }
+
+    #[test]
+    fn operational_failure_outranks_incomparable() {
+        let mut operational_failure = case("policy-failure");
+        operational_failure.contract_state = ContractState::ExecutionFailed;
+        operational_failure.execution_error_code = Some("execution_failed".into());
+        let mut incomparable = case("success");
+        incomparable.baseline_state = BaselineState::IncomparableEnvironment;
+
+        assert_eq!(
+            resolve_outcome(&[operational_failure, incomparable.clone()]),
+            (OverallState::CaseExecutionFailure, 3)
+        );
+
+        assert_eq!(
+            resolve_outcome(&[case("success"), incomparable]),
+            (OverallState::IncomparableEnvironment, 5)
+        );
     }
 }
