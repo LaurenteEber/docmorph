@@ -11,6 +11,9 @@ pub struct MockAdapter {
 }
 
 impl MockAdapter {
+    pub const IDENTITY_NAME: &str = "mock";
+    pub const IDENTITY_VERSION: &str = "0.1.0";
+
     #[must_use]
     pub fn invocation_count(&self) -> usize {
         self.invocations
@@ -32,8 +35,8 @@ impl MockAdapter {
 impl Adapter for MockAdapter {
     fn identity(&self) -> AdapterIdentity {
         AdapterIdentity {
-            name: "mock".into(),
-            version: "0.1.0".into(),
+            name: MockAdapter::IDENTITY_NAME.into(),
+            version: MockAdapter::IDENTITY_VERSION.into(),
         }
     }
 

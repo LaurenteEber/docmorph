@@ -7,8 +7,8 @@ This directory retains deterministic receipts for the Phase 0 mock evidence scen
 The separate structural catalog documents a project-authored PDF corpus whose files and provenance records are available in a clean checkout. Its structural-only declarations validate page origin, order, count, geometry, and rotation; they are baseline-free and do not execute PDFs or establish a supported capability.
 
 ## Named synthetic workflow
-Run the sole governed mock-only corpus in a fresh root: `cargo run -p docmorph-evidence --locked -- --named-run synthetic-smoke --run-root "$(mktemp -d "${TMPDIR:-/tmp}/docmorph-named.XXXXXX")" --repository-root .`
-`report.json` records only `policy-failure` then `success`; no PDF engine, structural PDF fixture, visual comparison, or fidelity claim is selected. Exit `0` means complete comparable matches, `4` means a comparable baseline mismatch, and `5` means an incomparable environment. The retained schema-1.2 receipts remain legacy comparison inputs; named runs do not rewrite or migrate them.
+Run the sole governed mock-only corpus in a fresh root: `cargo run -p docmorph-evidence --locked -- --named-run synthetic-smoke --run-root "$(mktemp -d "${TMPDIR:-/tmp}/docmorph-named.XXXXXX")/run" --repository-root .`
+`report.json` records only `policy-failure` then `success`; no PDF engine, structural PDF fixture, visual comparison, or fidelity claim is selected. Named outcomes use global precedence `3 > 5 > 4 > 0`: exit `0` means every case completed with a comparable baseline match; exit `2` means write-free preflight or configuration rejection; exit `3` means an operational failure or report-persistence failure after the run root is acquired, including when another case is incomparable; exit `4` means at least one comparable baseline mismatch and no higher-precedence outcome; and exit `5` means at least one incomparable environment with no operational failure. Each case retains its independent baseline and contract state in `report.json`, including an incomparable state when exit `3` wins globally. The retained schema-1.2 receipts remain legacy comparison inputs; named runs do not rewrite or migrate them.
 
 ## Governed reproduction
 
@@ -47,7 +47,7 @@ This workflow asserts semantic-hash equality only. It does not claim byte equali
 | `success/receipt.json` | `success` | Schema 1.2 receipt with catalog bindings, literal executable/argv, build compiler provenance, hashes, measured elapsed time, and `artifacts/success-output.mock`. |
 | `policy-failure/receipt.json` | `failure` | Schema 1.2 receipt with catalog bindings, exact declared policy diagnostic, `fixture_sha256: null`, and `artifact: null`. No output artifact is retained. |
 
-Keep each receipt with its referenced artifact for as long as the corresponding manifest is retained. Regenerate both after changing the evidence schema, manifest fields, mock behavior, contract version, or receipt semantics. Do not treat elapsed time as deterministic identity.
+Keep each receipt with its referenced artifact for as long as the corresponding manifest is retained. Rust `1.96.0` exclusively authors retained baselines when a deliberate regeneration is required after changing the evidence schema, manifest fields, mock behavior, contract version, or receipt semantics. Stable and CI validate retained evidence only: they never silently rewrite committed baselines or introduce a write path. Do not treat elapsed time as deterministic identity.
 
 ## Metric semantics
 

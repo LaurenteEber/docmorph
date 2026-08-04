@@ -5,6 +5,8 @@ use std::{
     collections::BTreeMap,
     path::{Component, Path},
 };
+
+use crate::report::Environment;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CorpusCatalog {
@@ -101,6 +103,7 @@ pub struct ValidatedCatalog {
 #[derive(Clone, Debug)]
 pub(crate) struct ValidatedBaseline {
     link: BaselineLink,
+    environment: Environment,
 }
 impl ValidatedBaseline {
     pub(crate) fn semantic_sha256(&self) -> &str {
@@ -110,6 +113,11 @@ impl ValidatedBaseline {
     #[allow(dead_code)]
     pub(crate) fn retained_receipt(&self) -> &str {
         &self.link.retained_receipt
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn environment(&self) -> &Environment {
+        &self.environment
     }
 }
 impl ValidatedCatalog {
@@ -288,7 +296,7 @@ pub fn validate_catalog_bytes(
                     &execution_revision_sha256,
                     &mut findings,
                 )
-                .map(|link| (fixture.id.clone(), ValidatedBaseline { link }))
+                .map(|baseline| (fixture.id.clone(), baseline))
             })
         })
         .collect();
@@ -340,7 +348,8 @@ fn baseline(
     catalog_id: &str,
     catalog_revision_sha256: &str,
     findings: &mut Vec<CatalogError>,
-) -> Option<BaselineLink> {
+) -> Option<ValidatedBaseline> {
+    let initial_findings = findings.len();
     let link_data = fixture.baseline.as_ref()?;
     let manifest = link(
         root,
@@ -502,7 +511,22 @@ fn baseline(
             ));
         }
     }
-    Some(link_data.clone())
+    if findings.len() != initial_findings {
+        return None;
+    }
+    let environment = Environment::try_from_receipt(&receipt)
+        .map_err(|_| {
+            findings.push(error(
+                "baseline_environment_provenance_invalid",
+                &fixture.id,
+                "retained_receipt",
+            ))
+        })
+        .ok()?;
+    Some(ValidatedBaseline {
+        link: link_data.clone(),
+        environment,
+    })
 }
 
 fn link(

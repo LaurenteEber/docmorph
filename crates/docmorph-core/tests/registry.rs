@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use docmorph_contracts::OperationKind;
+use docmorph_contracts::{AdapterIdentity, OperationKind};
 use docmorph_core::{MockAdapter, Registry};
 
 #[test]
@@ -9,7 +9,13 @@ fn mock_declaration_is_deterministic() {
 
     let declarations = registry.declarations();
     assert_eq!(declarations.len(), 1);
-    assert_eq!(declarations[0].0.name, "mock");
+    assert_eq!(
+        declarations[0].0,
+        AdapterIdentity {
+            name: "mock".into(),
+            version: "0.1.0".into(),
+        }
+    );
     assert_eq!(declarations[0].1[0].operation, OperationKind::MockTransform);
     assert!(declarations[0].1[0].available);
 }
