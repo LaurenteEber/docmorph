@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 #[allow(dead_code)]
 #[path = "../src/catalog.rs"]
 mod catalog;
+#[allow(dead_code)]
+#[path = "../src/report.rs"]
+mod report;
 #[path = "../src/structural_catalog.rs"]
 mod structural_catalog;
 
